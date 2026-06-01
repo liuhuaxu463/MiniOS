@@ -326,15 +326,37 @@ fn handle_put(
     match done_msg {
         ClientMessage::DataDone { uuid: _, pages_used: _ } => {
             // Read data from shared memory pages
-            let data = shm.read_pages(start_page, pages_needed, size)?;
+            let data = match shm.read_pages(start_page, pages_needed, size) {
+                Ok(d) => d,
+                Err(e) => {
+                    shm.free_pages(start_page, pages_needed).ok();
+                    let _ = ipc::send_response(
+                        stream,
+                        &ServerMessage::Error {
+                            code: "SHM_READ_ERROR".to_string(),
+                            message: format!("Failed to read from shared memory: {}", e),
+                        },
+                    );
+                    return Ok(());
+                }
+            };
 
-            // Free shared memory pages
-            shm.free_pages(start_page, pages_needed)?;
+            // Free shared memory pages (data is now in process memory)
+            shm.free_pages(start_page, pages_needed).ok();
 
             // Persist to storage
-            let obj_info = {
-                let mut st = storage.lock().unwrap();
-                st.put(name, &data, content_type, tags)?
+            let obj_info = match storage.lock().unwrap().put(name, &data, content_type, tags) {
+                Ok(info) => info,
+                Err(e) => {
+                    let _ = ipc::send_response(
+                        stream,
+                        &ServerMessage::Error {
+                            code: "STORAGE_ERROR".to_string(),
+                            message: format!("Failed to store object: {}", e),
+                        },
+                    );
+                    return Ok(());
+                }
             };
 
             // Update cache
@@ -401,34 +423,51 @@ fn handle_get(
 ) -> Result<()> {
     debug!("GET '{}'", key);
 
-    // Try cache first by key-as-uuid
+    // Try cache first by key-as-uuid, then fall back to storage
     let (obj_info, data) = if let Some(cached) = cache.get(key) {
         debug!("Cache hit for '{}'", key);
-        // Reconstruct ObjectInfo from cache
-        // We need to look up UUID from storage to get full info
-        let (info, _) = {
-            let mut st = storage.lock().unwrap();
-            st.get(key)?
-        };
-        (info, cached.data)
+        // Look up metadata from storage to get full info
+        match storage.lock().unwrap().get(key) {
+            Ok((info, _)) => (info, cached.data),
+            Err(e) => {
+                let _ = ipc::send_response(
+                    stream,
+                    &ServerMessage::Error {
+                        code: "NOT_FOUND".to_string(),
+                        message: format!("{}", e),
+                    },
+                );
+                return Ok(());
+            }
+        }
     } else {
         debug!("Cache miss for '{}', reading from storage", key);
         // Read from storage
-        let mut st = storage.lock().unwrap();
-        let (info, data) = st.get(key)?;
-
-        // Update cache
-        let cached = CachedObject {
-            uuid: info.uuid.clone(),
-            data: data.clone(),
-            name: info.name.clone(),
-            content_type: info.content_type.clone(),
-            size: info.size,
-            tags: info.tags.clone(),
-        };
-        cache.put(&info.uuid, cached);
-
-        (info, data)
+        match storage.lock().unwrap().get(key) {
+            Ok((info, data)) => {
+                // Update cache
+                let cached = CachedObject {
+                    uuid: info.uuid.clone(),
+                    data: data.clone(),
+                    name: info.name.clone(),
+                    content_type: info.content_type.clone(),
+                    size: info.size,
+                    tags: info.tags.clone(),
+                };
+                cache.put(&info.uuid, cached);
+                (info, data)
+            }
+            Err(e) => {
+                let _ = ipc::send_response(
+                    stream,
+                    &ServerMessage::Error {
+                        code: "NOT_FOUND".to_string(),
+                        message: format!("{}", e),
+                    },
+                );
+                return Ok(());
+            }
+        }
     };
 
     // Allocate shared memory pages for the data
@@ -528,7 +567,16 @@ fn handle_delete(
     // Delete from storage
     {
         let mut st = storage.lock().unwrap();
-        st.delete(key)?;
+        if let Err(e) = st.delete(key) {
+            let _ = ipc::send_response(
+                stream,
+                &ServerMessage::Error {
+                    code: "DELETE_ERROR".to_string(),
+                    message: format!("Failed to delete object: {}", e),
+                },
+            );
+            return Ok(());
+        }
     }
 
     // Remove from cache

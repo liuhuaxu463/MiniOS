@@ -688,6 +688,9 @@ impl ObjectStorage {
         self.super_block.object_count += 1;
         self.dirty = true;
 
+        // Flush to ensure subsequent reads see the latest state
+        self.flush()?;
+
         Ok(info)
     }
 
@@ -747,6 +750,9 @@ impl ObjectStorage {
         // Update super block
         self.super_block.object_count -= 1;
         self.dirty = true;
+
+        // Flush to ensure subsequent reads see the latest state
+        self.flush()?;
 
         Ok(())
     }
