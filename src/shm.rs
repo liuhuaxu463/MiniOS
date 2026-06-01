@@ -186,6 +186,7 @@ impl SharedMemory {
     }
 
     /// Write a header back to the shared memory region.
+    #[allow(dead_code)]
     fn write_header(&self, header: &ShmHeader) {
         unsafe {
             (self.ptr as *mut ShmHeader).write(*header);
@@ -217,43 +218,32 @@ impl SharedMemory {
         let shm_name_c = std::ffi::CString::new(shm_name.as_bytes())
             .map_err(|e| MiniOsError::Shm(format!("Invalid shm name: {}", e)))?;
 
-        let fd = unsafe {
-            libc::shm_open(
-                shm_name_c.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o666,
-            )
-        };
+        // Try to create the shared memory object.
+        // If it already exists from a previous crashed run, unlink and retry.
+        let fd = loop {
+            let fd = unsafe {
+                libc::shm_open(
+                    shm_name_c.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    0o666,
+                )
+            };
 
-        if fd < 0 {
+            if fd >= 0 {
+                break fd;
+            }
+
             let err = std::io::Error::last_os_error();
-            // If already exists, try opening it
             if err.raw_os_error() == Some(libc::EEXIST) {
                 warn!("Shared memory already exists, attempting to re-create...");
-                // Unlink and try again
                 unsafe { libc::shm_unlink(shm_name_c.as_ptr()) };
-                let fd2 = unsafe {
-                    libc::shm_open(
-                        shm_name_c.as_ptr(),
-                        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                        0o666,
-                    )
-                };
-                if fd2 < 0 {
-                    return Err(MiniOsError::Shm(format!(
-                        "shm_open failed after cleanup: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                fd2
+                // Loop back to try shm_open again
             } else {
                 return Err(MiniOsError::Shm(format!(
                     "shm_open failed: {}",
                     err
                 )));
             }
-        } else {
-            fd
         };
 
         // Set size

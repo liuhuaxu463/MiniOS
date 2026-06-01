@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 /// Cached object data along with its metadata
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CachedObject {
     pub uuid: String,
     pub data: Vec<u8>,
@@ -19,6 +20,7 @@ pub struct CachedObject {
 pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
+    #[allow(dead_code)]
     pub evictions: u64,
     pub size: usize,
     pub capacity: usize,

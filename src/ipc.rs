@@ -1,12 +1,11 @@
 use crate::error::{MiniOsError, Result};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use std::ffi::CString;
-use std::io::{self, Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -234,6 +233,7 @@ pub fn recv_request(stream: &mut UnixStream) -> Result<ClientMessage> {
 // ============================================================================
 
 /// Type alias for a function that handles a single client connection
+#[allow(dead_code)]
 pub type ClientHandler = Arc<
     dyn Fn(&mut UnixStream) -> Result<()> + Send + Sync + 'static,
 >;
@@ -255,12 +255,12 @@ impl IpcServer {
         }
     }
 
-    /// Get the socket path
+    #[allow(dead_code)]
     pub fn socket_path(&self) -> &str {
         &self.socket_path
     }
 
-    /// Check if the server is running
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -404,8 +404,8 @@ impl IpcClient {
 
     /// Connect to the server and get a stream (for multi-message exchanges).
     ///
-    /// Uses non-blocking connect with a 5-second timeout to avoid hanging
-    /// when the server is not running.
+    /// Uses a separate thread with a channel to implement connection timeout,
+    /// since std's UnixStream::connect() has no built-in timeout mechanism.
     pub fn connect(&self) -> Result<UnixStream> {
         // Fast-fail: check if socket file exists
         let path = Path::new(&self.socket_path);
@@ -416,122 +416,43 @@ impl IpcClient {
             )));
         }
 
-        // Build sockaddr_un for the socket path
-        let sockaddr = self.make_sockaddr()?;
+        // Use a thread + channel to add timeout to UnixStream::connect
+        // This avoids all the complexity of raw sockets / non-blocking / poll
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
 
-        // Create raw socket
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        if fd < 0 {
-            return Err(MiniOsError::Ipc(format!(
-                "Failed to create socket: {}",
-                io::Error::last_os_error()
-            )));
-        }
+        thread::spawn(move || {
+            let result = UnixStream::connect(&socket_path);
+            // Ignore send error — receiver may have timed out and dropped
+            let _ = tx.send(result);
+        });
 
-        // Set non-blocking to enable timeout
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            unsafe { libc::close(fd) };
-            return Err(MiniOsError::Ipc(format!(
-                "Failed to set non-blocking: {}",
-                io::Error::last_os_error()
-            )));
-        }
-
-        // Attempt non-blocking connect
-        let ret = unsafe {
-            libc::connect(
-                fd,
-                sockaddr.as_ptr() as *const libc::sockaddr,
-                sockaddr.len() as libc::socklen_t,
-            )
-        };
-
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            // EINPROGRESS means connect is in progress (expected for non-blocking)
-            if err.raw_os_error() != Some(libc::EINPROGRESS) {
-                unsafe { libc::close(fd) };
-                return Err(MiniOsError::Ipc(format!(
-                    "Cannot connect to server at {}: {}. Is the server running?",
-                    self.socket_path, err
-                )));
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(stream)) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .ok();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(30)))
+                    .ok();
+                Ok(stream)
             }
-
-            // Wait for the connection to complete with a poll timeout
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-
-            let poll_timeout: i32 = 5000; // 5 seconds
-            let poll_ret = unsafe { libc::poll(&mut pfd, 1, poll_timeout) };
-
-            if poll_ret < 0 {
-                unsafe { libc::close(fd) };
-                return Err(MiniOsError::Ipc(format!(
-                    "Connection poll failed: {}",
-                    io::Error::last_os_error()
-                )));
-            }
-            if poll_ret == 0 {
-                unsafe { libc::close(fd) };
-                return Err(MiniOsError::Ipc(format!(
+            Ok(Err(e)) => Err(MiniOsError::Ipc(format!(
+                "Cannot connect to server at {}: {}. Is the server running?",
+                self.socket_path, e
+            ))),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(MiniOsError::Ipc(format!(
                     "Connection to server at {} timed out after 5s. Is the server running?",
                     self.socket_path
-                )));
+                )))
             }
-            // Check if there was an error on the socket
-            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-                unsafe { libc::close(fd) };
-                return Err(MiniOsError::Ipc(format!(
-                    "Cannot connect to server at {}. Server may not be running.",
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(MiniOsError::Ipc(format!(
+                    "Connection to server at {} failed (internal error).",
                     self.socket_path
-                )));
+                )))
             }
         }
-
-        // Restore blocking mode
-        if flags >= 0 {
-            unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-        }
-
-        // Wrap fd in UnixStream
-        let stream = unsafe { UnixStream::from_raw_fd(fd) };
-
-        // Set read/write timeouts
-        let timeout = Duration::from_secs(30);
-        stream.set_read_timeout(Some(timeout)).ok();
-        stream.set_write_timeout(Some(timeout)).ok();
-
-        Ok(stream)
-    }
-
-    /// Build a sockaddr_un for the socket path
-    fn make_sockaddr(&self) -> Result<[libc::c_char; 110]> {
-        let path_c =
-            CString::new(self.socket_path.as_bytes()).map_err(|e| {
-                MiniOsError::Ipc(format!("Invalid socket path: {}", e))
-            })?;
-
-        let path_bytes = path_c.as_bytes_with_nul();
-        if path_bytes.len() > 108 {
-            return Err(MiniOsError::Ipc(format!(
-                "Socket path too long (max 108 bytes): {}",
-                self.socket_path
-            )));
-        }
-
-        // sockaddr_un: sa_family_t (2 bytes) + sun_path (108 bytes) = 110 bytes
-        let mut addr: [libc::c_char; 110] = [0; 110];
-        // AF_UNIX = 1 (usually u16, little-endian)
-        addr[0] = 1; // AF_UNIX lo-byte
-        addr[1] = 0; // AF_UNIX hi-byte
-        // Copy path (with null) starting at offset 2
-        for (i, &b) in path_bytes.iter().enumerate() {
-            addr[2 + i] = b as libc::c_char;
-        }
-        Ok(addr)
     }
 }

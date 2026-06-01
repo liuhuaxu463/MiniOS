@@ -20,6 +20,7 @@ pub enum MiniOsError {
     Ipc(String),
 
     #[error("Cache error: {0}")]
+    #[allow(dead_code)]
     Cache(String),
 
     #[error("Server error: {0}")]

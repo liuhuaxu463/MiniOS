@@ -166,7 +166,7 @@ impl Server {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Get uptime in seconds
+    #[allow(dead_code)]
     pub fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().as_secs()
     }
