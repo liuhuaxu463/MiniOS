@@ -1,8 +1,5 @@
 use crate::error::{MiniOsError, Result};
-use log::{debug, error, info, warn};
-use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use log::{debug, info, warn};
 
 // ============================================================================
 // Constants
@@ -22,14 +19,14 @@ const SHM_HEADER_SIZE: u64 = 64;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct ShmHeader {
-    magic: u32,        // offset 0
-    version: u32,      // offset 4
-    total_size: u64,   // offset 8
-    page_size: u32,    // offset 16
-    num_pages: u32,    // offset 20
+    magic: u32,         // offset 0
+    version: u32,       // offset 4
+    total_size: u64,    // offset 8
+    page_size: u32,     // offset 16
+    num_pages: u32,     // offset 20
     bitmap_offset: u64, // offset 24
-    data_offset: u64,  // offset 32
-    free_pages: u32,   // offset 40
+    data_offset: u64,   // offset 32
+    free_pages: u32,    // offset 40
     reserved: [u8; 20], // offset 44 (pad to 64 bytes)
 }
 
@@ -90,7 +87,8 @@ impl ShmHeader {
             )));
         }
 
-        let version = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let version =
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
         off += 4;
 
         if version != SHM_VERSION {
@@ -106,10 +104,12 @@ impl ShmHeader {
         ]);
         off += 8;
 
-        let page_size = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let page_size =
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
         off += 4;
 
-        let num_pages = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let num_pages =
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
         off += 4;
 
         let bitmap_offset = u64::from_le_bytes([
@@ -124,7 +124,8 @@ impl ShmHeader {
         ]);
         off += 8;
 
-        let free_pages = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        let free_pages =
+            u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
 
         Ok(Self {
             magic,
@@ -164,8 +165,6 @@ pub struct SharedMemory {
     ptr: *mut u8,
     /// Total size of the mapping
     size: u64,
-    /// Parsed header (cache for quick access)
-    header: ShmHeader,
     /// Name of the shared memory object
     name: String,
     /// File descriptor for the shared memory object
@@ -180,9 +179,26 @@ unsafe impl Send for SharedMemory {}
 unsafe impl Sync for SharedMemory {}
 
 impl SharedMemory {
+    /// Read the header from the shared memory region (always reads the
+    /// authoritative copy from mmap, never caches).
+    fn read_header(&self) -> ShmHeader {
+        unsafe { std::ptr::read(self.ptr as *const ShmHeader) }
+    }
+
+    /// Write a header back to the shared memory region.
+    fn write_header(&self, header: &ShmHeader) {
+        unsafe {
+            (self.ptr as *mut ShmHeader).write(*header);
+        }
+    }
+
+    /// Get a mutable reference to the header in shared memory.
+    fn header_mut_ptr(&self) -> *mut ShmHeader {
+        self.ptr as *mut ShmHeader
+    }
+
     /// Create a new shared memory region (server-side)
     ///
-    /// # Safety
     /// Uses raw system calls (shm_open, ftruncate, mmap). Only call this
     /// from the server process.
     pub fn create(name: &str, total_size: u64, page_size: u32) -> Result<Self> {
@@ -268,16 +284,21 @@ impl SharedMemory {
             return Err(MiniOsError::Shm(format!("mmap failed: {}", err)));
         }
 
-        // Initialize header
+        // Initialize header — write via raw pointer, then read back to verify
         let header = ShmHeader::new(total_size, page_size);
         let header_bytes = header.to_bytes();
         unsafe {
-            ptr.copy_from_nonoverlapping(header_bytes.as_ptr(), SHM_HEADER_SIZE as usize);
+            let dst = ptr as *mut u8;
+            std::ptr::copy_nonoverlapping(
+                header_bytes.as_ptr() as *const libc::c_void,
+                dst as *mut libc::c_void,
+                SHM_HEADER_SIZE as usize,
+            );
         }
 
         // Initialize bitmap (all zeros = all free)
         let bitmap_size = (header.num_pages as u64 + 7) / 8;
-        let bitmap_ptr = unsafe { ptr.add(header.bitmap_offset as usize) };
+        let bitmap_ptr = unsafe { (ptr as *mut u8).add(header.bitmap_offset as usize) };
         unsafe {
             libc::memset(
                 bitmap_ptr as *mut libc::c_void,
@@ -294,7 +315,6 @@ impl SharedMemory {
         Ok(Self {
             ptr: ptr as *mut u8,
             size: total_size,
-            header,
             name: shm_name,
             shm_fd: fd,
             is_owner: true,
@@ -341,10 +361,15 @@ impl SharedMemory {
             return Err(MiniOsError::Shm(format!("mmap header failed: {}", err)));
         }
 
-        // Read header
+        // Read header via raw pointer
         let mut header_buf = [0u8; SHM_HEADER_SIZE as usize];
         unsafe {
-            ptr.copy_to_nonoverlapping(header_buf.as_mut_ptr(), SHM_HEADER_SIZE as usize);
+            let src = ptr as *const u8;
+            std::ptr::copy_nonoverlapping(
+                src as *const libc::c_void,
+                header_buf.as_mut_ptr() as *mut libc::c_void,
+                SHM_HEADER_SIZE as usize,
+            );
         }
         let header = ShmHeader::from_bytes(&header_buf)?;
 
@@ -376,7 +401,6 @@ impl SharedMemory {
         Ok(Self {
             ptr: full_ptr as *mut u8,
             size: header.total_size,
-            header,
             name: shm_name,
             shm_fd: fd,
             is_owner: false,
@@ -387,24 +411,27 @@ impl SharedMemory {
 
     /// Check if a page is used
     fn is_page_used(&self, page: u32) -> bool {
-        if page >= self.header.num_pages {
+        let header = self.read_header();
+        if page >= header.num_pages {
             return true; // out of range = "used"
         }
         let byte_idx = (page / 8) as usize;
         let bit_idx = (page % 8) as u8;
-        let bitmap_ptr = unsafe { self.ptr.add(self.header.bitmap_offset as usize) };
+        let bitmap_ptr = unsafe { self.ptr.add(header.bitmap_offset as usize) };
         let byte = unsafe { *bitmap_ptr.add(byte_idx) };
         byte & (1 << bit_idx) != 0
     }
 
-    /// Set a page's allocation bit
+    /// Set a page's allocation bit. Uses interior mutability through the
+    /// raw mmap pointer, so `&self` is sufficient.
     fn set_page_bit(&self, page: u32, used: bool) {
-        if page >= self.header.num_pages {
+        let header = self.read_header();
+        if page >= header.num_pages {
             return;
         }
         let byte_idx = (page / 8) as usize;
         let bit_idx = (page % 8) as u8;
-        let bitmap_ptr = unsafe { self.ptr.add(self.header.bitmap_offset as usize) };
+        let bitmap_ptr = unsafe { self.ptr.add(header.bitmap_offset as usize) };
         unsafe {
             let byte_ptr = bitmap_ptr.add(byte_idx);
             if used {
@@ -414,25 +441,26 @@ impl SharedMemory {
             }
         }
 
-        // Update header free_pages
-        let header_ptr = self.ptr as *mut ShmHeader;
+        // Update header free_pages in-place (mmap'd memory)
+        let header_ptr = self.header_mut_ptr();
         unsafe {
             if used {
                 (*header_ptr).free_pages -= 1;
             } else {
                 (*header_ptr).free_pages += 1;
             }
-            self.header = *header_ptr;
         }
     }
 
     /// Get a pointer to the data area of a specific page
     pub fn page_ptr(&self, page: u32) -> *mut u8 {
-        let offset = self.header.data_offset + page as u64 * self.header.page_size as u64;
+        let header = self.read_header();
+        let offset = header.data_offset + page as u64 * header.page_size as u64;
         unsafe { self.ptr.add(offset as usize) }
     }
 
     /// Get a const pointer to the data area of a specific page
+    #[allow(dead_code)]
     pub fn page_ptr_const(&self, page: u32) -> *const u8 {
         self.page_ptr(page) as *const u8
     }
@@ -449,19 +477,20 @@ impl SharedMemory {
                 "Cannot allocate 0 pages".to_string(),
             ));
         }
-        if count > self.header.num_pages {
+
+        let num_pages = self.read_header().num_pages;
+        if count > num_pages {
             return Err(MiniOsError::Shm(format!(
                 "Requested {} pages but only {} exist",
-                count, self.header.num_pages
+                count, num_pages
             )));
         }
 
         // Simple first-fit with busy-wait for contiguity
-        // In production, this would use a condition variable
         loop {
-            let free = self.header.free_pages;
+            let header = self.read_header();
+            let free = header.free_pages;
             if free < count {
-                // Not enough total free pages — this is blocking
                 debug!(
                     "Waiting for free pages (need {}, have {})",
                     count, free
@@ -474,7 +503,7 @@ impl SharedMemory {
             let mut consecutive = 0u32;
             let mut start = 0u32;
 
-            for page in 0..self.header.num_pages {
+            for page in 0..header.num_pages {
                 if !self.is_page_used(page) {
                     if consecutive == 0 {
                         start = page;
@@ -485,11 +514,10 @@ impl SharedMemory {
                         for p in start..start + count {
                             self.set_page_bit(p, true);
                         }
+                        let hdr = self.read_header();
                         debug!(
                             "Allocated {} pages starting at page {} ({} free remaining)",
-                            count,
-                            start,
-                            self.header.free_pages
+                            count, start, hdr.free_pages
                         );
                         return Ok(start);
                     }
@@ -501,7 +529,7 @@ impl SharedMemory {
             // No contiguous block found — wait and retry
             debug!(
                 "No contiguous block of {} pages found ({} free), waiting...",
-                count, self.header.free_pages
+                count, header.free_pages
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -509,12 +537,13 @@ impl SharedMemory {
 
     /// Free `count` pages starting from `start_page`
     pub fn free_pages(&self, start_page: u32, count: u32) -> Result<()> {
-        if start_page + count > self.header.num_pages {
+        let header = self.read_header();
+        if start_page + count > header.num_pages {
             return Err(MiniOsError::Shm(format!(
                 "Cannot free pages {}-{} (max is {})",
                 start_page,
                 start_page + count - 1,
-                self.header.num_pages
+                header.num_pages
             )));
         }
 
@@ -522,9 +551,10 @@ impl SharedMemory {
             self.set_page_bit(page, false);
         }
 
+        let hdr = self.read_header();
         debug!(
             "Freed {} pages starting at page {} ({} free now)",
-            count, start_page, self.header.free_pages
+            count, start_page, hdr.free_pages
         );
 
         Ok(())
@@ -532,10 +562,10 @@ impl SharedMemory {
 
     /// Write data to a contiguous range of pages
     pub fn write_pages(&self, start_page: u32, data: &[u8]) -> Result<()> {
-        let page_size = self.header.page_size as usize;
-        let total_capacity = self.header.num_pages as usize * page_size;
-        let start_offset = self.header.data_offset as usize
-            + start_page as usize * page_size;
+        let header = self.read_header();
+        let page_size = header.page_size as usize;
+        let start_offset =
+            header.data_offset as usize + start_page as usize * page_size;
 
         if start_offset + data.len() > self.size as usize {
             return Err(MiniOsError::Shm(format!(
@@ -547,7 +577,11 @@ impl SharedMemory {
 
         unsafe {
             let dst = self.ptr.add(start_offset);
-            dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr() as *const libc::c_void,
+                dst as *mut libc::c_void,
+                data.len(),
+            );
         }
 
         debug!(
@@ -560,15 +594,20 @@ impl SharedMemory {
 
     /// Read data from a contiguous range of pages
     pub fn read_pages(&self, start_page: u32, count: u32, expected_size: u64) -> Result<Vec<u8>> {
-        let page_size = self.header.page_size as usize;
+        let header = self.read_header();
+        let page_size = header.page_size as usize;
         let total_bytes = count as usize * page_size;
-        let start_offset = self.header.data_offset as usize
-            + start_page as usize * page_size;
+        let start_offset =
+            header.data_offset as usize + start_page as usize * page_size;
 
         let mut data = vec![0u8; total_bytes];
         unsafe {
             let src = self.ptr.add(start_offset);
-            src.copy_to_nonoverlapping(data.as_mut_ptr(), total_bytes);
+            std::ptr::copy_nonoverlapping(
+                src as *const libc::c_void,
+                data.as_mut_ptr() as *mut libc::c_void,
+                total_bytes,
+            );
         }
 
         data.truncate(expected_size as usize);
@@ -577,33 +616,36 @@ impl SharedMemory {
 
     /// Get the page size
     pub fn page_size(&self) -> u32 {
-        self.header.page_size
+        self.read_header().page_size
     }
 
     /// Get the total number of pages
     pub fn num_pages(&self) -> u32 {
-        self.header.num_pages
+        self.read_header().num_pages
     }
 
     /// Get the number of free pages
-    pub fn free_pages(&self) -> u32 {
-        self.header.free_pages
+    pub fn free_page_count(&self) -> u32 {
+        self.read_header().free_pages
     }
 
     /// Get the shared memory name
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Get shared memory status as a debug string
+    #[allow(dead_code)]
     pub fn status_string(&self) -> String {
+        let header = self.read_header();
         format!(
             "SHM '{}': {} pages ({} free), page_size={}, total={}",
             self.name,
-            self.header.num_pages,
-            self.header.free_pages,
-            self.header.page_size,
-            self.header.total_size,
+            header.num_pages,
+            header.free_pages,
+            header.page_size,
+            header.total_size,
         )
     }
 }
@@ -626,6 +668,3 @@ impl Drop for SharedMemory {
         }
     }
 }
-
-/// Thread-safe wrapper for shared memory, used by the server
-pub type SharedShm = Arc<SharedMemory>;

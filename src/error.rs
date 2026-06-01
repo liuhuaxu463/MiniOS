@@ -40,9 +40,6 @@ pub enum MiniOsError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
-    #[error("Nix error: {0}")]
-    Nix(#[from] nix::Error),
-
     #[error("UTF-8 conversion error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 

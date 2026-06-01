@@ -4,7 +4,7 @@ use crate::error::{MiniOsError, Result};
 use crate::ipc::{self, ClientMessage, IpcClient, ServerMessage};
 use crate::server;
 use crate::shm::SharedMemory;
-use log::{debug, error, info, warn};
+use log::info;
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -115,7 +115,7 @@ impl Client {
                 uuid,
                 start_page,
                 page_count,
-                page_size,
+                page_size: _,
                 data_size: _,
             } => {
                 // Open shared memory and write data
@@ -146,7 +146,7 @@ impl Client {
                         content_type,
                         created_at,
                         tags,
-                        block_count,
+                        block_count: _,
                     } => {
                         println!("\n✓ Object stored successfully!");
                         println!("  UUID:        {}", uuid);
@@ -196,7 +196,7 @@ impl Client {
                 uuid,
                 start_page,
                 page_count,
-                page_size,
+                page_size: _,
                 data_size,
             } => {
                 // Receive object info
@@ -335,7 +335,7 @@ impl Client {
                             content_type,
                             created_at,
                             tags: _,
-                            block_count,
+                            block_count: _,
                         } = obj
                         {
                             println!(

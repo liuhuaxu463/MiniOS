@@ -3,8 +3,6 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use crate::error::{MiniOsError, Result};
-
 /// Cached object data along with its metadata
 #[derive(Debug, Clone)]
 pub struct CachedObject {

@@ -42,8 +42,8 @@ fn main() {
     // Determine mode: server or client
     if args.server_mode {
         run_server(args);
-    } else if let Some(cmd) = &args.command {
-        run_client_command(args, cmd);
+    } else if let Some(cmd) = args.command.clone() {
+        run_client_command(args, &cmd);
     } else {
         eprintln!("MiniOS - Mini Object Storage Service");
         eprintln!();
@@ -72,8 +72,11 @@ fn run_server(args: CliArgs) {
     info!("  Socket:  {}", args.socket_path);
     info!("  SHM:     {} ({} bytes)", args.shm_name, args.shm_size);
 
+    // Save pid_file path before args is moved into Server::new()
+    let pid_file = args.pid_file.clone();
+
     // Write PID file
-    if let Err(e) = server::write_pid_file(&args.pid_file) {
+    if let Err(e) = server::write_pid_file(&pid_file) {
         error!("Could not write PID file: {}", e);
     }
 
@@ -114,7 +117,7 @@ fn run_server(args: CliArgs) {
     }
 
     // Clean up PID file
-    server::remove_pid_file(&args.pid_file);
+    server::remove_pid_file(&pid_file);
 }
 
 fn run_client_command(args: CliArgs, cmd: &ClientCommand) {

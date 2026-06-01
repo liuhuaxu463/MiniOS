@@ -1,6 +1,4 @@
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-
 /// MiniOS - Mini Object Storage Service
 #[derive(Parser, Debug, Clone)]
 #[command(name = "minios", version, about = "Mini Object Storage Service")]

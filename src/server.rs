@@ -3,11 +3,11 @@ use crate::config::CliArgs;
 use crate::error::{MiniOsError, Result};
 use crate::ipc::{self, ClientMessage, IpcServer, ServerMessage};
 use crate::shm::SharedMemory;
-use crate::storage::{self, ObjectStorage, SharedStorage, StorageStatus};
-use log::{debug, error, info, warn};
+use crate::storage::{self, SharedStorage};
+use log::{debug, info, warn};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -324,7 +324,7 @@ fn handle_put(
     let done_msg = ipc::recv_request(stream)?;
 
     match done_msg {
-        ClientMessage::DataDone { uuid: _, pages_used } => {
+        ClientMessage::DataDone { uuid: _, pages_used: _ } => {
             // Read data from shared memory pages
             let data = shm.read_pages(start_page, pages_needed, size)?;
 
@@ -589,11 +589,9 @@ fn handle_status(
 ) -> Result<()> {
     debug!("STATUS");
 
-    let (status, store_path) = {
+    let status = {
         let st = storage.lock().unwrap();
-        let mut s = st.status();
-        // Can't easily get store_path from storage, pass from config
-        (s, String::new())
+        st.status()
     };
 
     let cache_stats = cache.stats();
@@ -615,7 +613,7 @@ fn handle_status(
         cache_size: cache_stats.size,
         cache_capacity: cache_stats.capacity,
         shm_pages_total: shm.num_pages(),
-        shm_pages_free: shm.free_pages(),
+        shm_pages_free: shm.free_page_count(),
         uptime_seconds: uptime,
     };
 
@@ -626,15 +624,15 @@ fn handle_status(
 /// Handle DataDone for PUT (data is now in shared memory, persist it)
 fn handle_data_done(
     stream: &mut UnixStream,
-    storage: &SharedStorage,
-    cache: &Arc<ObjectCache>,
-    shm: &Arc<SharedMemory>,
-    uuid: &str,
-    pages_used: u32,
+    _storage: &SharedStorage,
+    _cache: &Arc<ObjectCache>,
+    _shm: &Arc<SharedMemory>,
+    _uuid: &str,
+    _pages_used: u32,
 ) -> Result<()> {
     // This is a simplified handler; the full DataDone handling is in handle_put
     // as part of the two-phase PUT protocol
-    let _ = ipc::send_response(
+    let _resp = ipc::send_response(
         stream,
         &ServerMessage::Ok {
             message: Some("Data transfer acknowledged".to_string()),

@@ -448,7 +448,6 @@ impl MetadataEntry {
         let entry_size = u32::from_le_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
         ]);
-        offset += 4;
 
         Ok((
             Self {
@@ -695,6 +694,7 @@ impl ObjectStorage {
     /// Get an object from the store by UUID or name
     /// Returns (ObjectInfo, data_bytes)
     pub fn get(&mut self, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
+        // already &mut self — correct
         let entry = self
             .find_entry(key)?
             .ok_or_else(|| MiniOsError::NotFound(format!("Object not found: {}", key)))?;
@@ -752,7 +752,7 @@ impl ObjectStorage {
     }
 
     /// List all objects
-    pub fn list(&self) -> Result<Vec<ObjectInfo>> {
+    pub fn list(&mut self) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
         let entries = self.scan_all_entries()?;
         for entry in entries {
@@ -893,13 +893,13 @@ impl ObjectStorage {
     }
 
     /// Find an object entry by UUID or name (tries UUID first, then name)
-    fn find_entry(&self, key: &str) -> Result<Option<MetadataEntry>> {
+    fn find_entry(&mut self, key: &str) -> Result<Option<MetadataEntry>> {
         self.find_entry_with_offset(key)
             .map(|opt| opt.map(|(entry, _)| entry))
     }
 
     /// Find an object entry by key, returning (entry, file_offset_of_entry)
-    fn find_entry_with_offset(&self, key: &str) -> Result<Option<(MetadataEntry, u64)>> {
+    fn find_entry_with_offset(&mut self, key: &str) -> Result<Option<(MetadataEntry, u64)>> {
         // Try parsing as UUID first
         let uuid_key = uuid::Uuid::parse_str(key).ok();
 
@@ -921,7 +921,7 @@ impl ObjectStorage {
     }
 
     /// Find an object by name only (returns entry if exists and not deleted)
-    fn find_by_name(&self, name: &str) -> Option<MetadataEntry> {
+    fn find_by_name(&mut self, name: &str) -> Option<MetadataEntry> {
         let entries = self.scan_all_entries().ok()?;
         entries.into_iter().find(|e| {
             e.flags & META_FLAG_DELETED == 0 && e.name == name
@@ -929,13 +929,13 @@ impl ObjectStorage {
     }
 
     /// Scan all metadata entries (without offsets)
-    fn scan_all_entries(&self) -> Result<Vec<MetadataEntry>> {
+    fn scan_all_entries(&mut self) -> Result<Vec<MetadataEntry>> {
         self.scan_all_entries_with_offsets()
             .map(|v| v.into_iter().map(|(e, _)| e).collect())
     }
 
     /// Scan all metadata entries with their file offsets
-    fn scan_all_entries_with_offsets(&self) -> Result<Vec<(MetadataEntry, u64)>> {
+    fn scan_all_entries_with_offsets(&mut self) -> Result<Vec<(MetadataEntry, u64)>> {
         let mut entries = Vec::new();
         let metadata_offset = self.metadata_offset();
         let metadata_size = self.super_block.metadata_area_size;
