@@ -82,7 +82,7 @@ impl Server {
                 self.config.cache_warmup
             );
             let objects = {
-                let storage = self.storage.lock().unwrap();
+                let mut storage = self.storage.lock().unwrap();
                 match storage.list() {
                     Ok(list) => list,
                     Err(e) => {
@@ -266,7 +266,7 @@ fn handle_put(
 ) -> Result<()> {
     // Check for duplicate name
     {
-        let st = storage.lock().unwrap();
+        let mut st = storage.lock().unwrap();
         if let Ok(list) = st.list() {
             if list.iter().any(|o| o.name == name) {
                 let _ = ipc::send_response(
@@ -554,7 +554,7 @@ fn handle_list(
     debug!("LIST");
 
     let objects = {
-        let st = storage.lock().unwrap();
+        let mut st = storage.lock().unwrap();
         st.list()?
     };
 

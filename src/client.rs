@@ -146,7 +146,7 @@ impl Client {
                         content_type,
                         created_at,
                         tags,
-                        block_count: _,
+                        block_count,
                     } => {
                         println!("\n✓ Object stored successfully!");
                         println!("  UUID:        {}", uuid);
