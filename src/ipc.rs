@@ -20,6 +20,16 @@ pub struct CacheBenchmarkEntry {
     pub hit_rate: f64,
 }
 
+/// A row in a capacity-sweep benchmark.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheSweepRow {
+    pub algorithm: String,
+    pub capacity: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub hit_rate: f64,
+}
+
 // ============================================================================
 // IPC Message Protocol
 // ============================================================================
@@ -86,6 +96,8 @@ pub enum ClientMessage {
     CacheBenchmark {
         /// Number of iterations for the simulated workload
         iterations: usize,
+        /// Sweep mode: test across multiple capacities
+        sweep: bool,
     },
 }
 
@@ -150,6 +162,14 @@ pub enum ServerMessage {
         /// Number of unique keys in the benchmark workload
         workload_keys: usize,
         /// Total iterations run
+        iterations: usize,
+    },
+
+    /// Capacity-sweep benchmark result: hit rate per (algorithm, capacity)
+    CacheBenchmarkSweep {
+        /// (algorithm, capacity, hit_rate, hits, misses) rows, sorted by hit rate
+        rows: Vec<CacheSweepRow>,
+        workload_keys: usize,
         iterations: usize,
     },
 
@@ -302,11 +322,14 @@ impl IpcServer {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Start the IPC server.
+    /// Start the IPC server with a multi-producer multi-consumer thread pool.
     ///
-    /// Spawns a thread for each client connection. The `handler` function
-    /// is called with each connected client stream.
-    pub fn start<F>(&mut self, handler: F) -> Result<()>
+    /// Uses a bounded channel (capacity = num_workers * 2) as the work queue.
+    /// The accept thread (producer) pushes connections into the queue.
+    /// `num_workers` threads (consumers) dequeue and handle each connection.
+    /// This provides backpressure — when all workers are busy, the accept
+    /// thread blocks on `tx.send()`, preventing unbounded thread creation.
+    pub fn start<F>(&mut self, handler: F, num_workers: usize) -> Result<()>
     where
         F: Fn(&mut UnixStream) -> Result<()> + Send + Sync + 'static,
     {
@@ -339,7 +362,6 @@ impl IpcServer {
         })?;
 
         // Set permissions to allow any user to connect
-        // (on Linux, use fchmod; on other Unix, try chmod on the path)
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -357,28 +379,61 @@ impl IpcServer {
 
         let running = self.running.clone();
         let handler = Arc::new(handler);
+        let nw = num_workers.max(1);
 
         info!(
-            "IPC server listening on {}",
-            self.socket_path
+            "IPC server listening on {} (MP-MC: {} workers, queue depth {})",
+            self.socket_path, nw, nw * 2
         );
 
-        // Accept connections in a dedicated thread
+        // Bounded channel as the work queue: accept thread → channel → workers
+        let (tx, rx): (mpsc::Sender<UnixStream>, mpsc::Receiver<UnixStream>) =
+            mpsc::sync_channel(nw * 2);
+
+        // Spawn worker threads (consumers).
+        // Use recv_timeout so no worker holds the mutex while blocking.
+        let rx = Arc::new(Mutex::new(rx));
+        for id in 0..nw {
+            let rx = rx.clone();
+            let h = handler.clone();
+            let r = running.clone();
+            thread::spawn(move || {
+                loop {
+                    let stream_opt = {
+                        let rx_lock = rx.lock().unwrap();
+                        rx_lock.recv_timeout(Duration::from_millis(200)).ok()
+                    };
+                    match stream_opt {
+                        None => {
+                            // Timeout or disconnected — check if we should exit
+                            if !r.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            // Otherwise keep polling
+                        }
+                        Some(mut stream) => {
+                            debug!("Worker {} handling connection", id);
+                            if let Err(e) = h(&mut stream) {
+                                error!("Worker {} error handling client: {}", id, e);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Accept thread (producer)
         thread::spawn(move || {
             for stream in listener_copy.incoming() {
                 if !running.load(Ordering::SeqCst) {
                     break;
                 }
-
                 match stream {
-                    Ok(mut client_stream) => {
-                        debug!("New client connection");
-                        let h = handler.clone();
-                        thread::spawn(move || {
-                            if let Err(e) = h(&mut client_stream) {
-                                error!("Error handling client: {}", e);
-                            }
-                        });
+                    Ok(client_stream) => {
+                        // send will block if the channel is full (backpressure)
+                        if tx.send(client_stream).is_err() {
+                            break; // all receivers dropped
+                        }
                     }
                     Err(e) => {
                         if running.load(Ordering::SeqCst) {

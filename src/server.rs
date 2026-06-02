@@ -140,7 +140,7 @@ impl Server {
 
         // Start IPC server
         let mut ipc = self.ipc.lock().unwrap();
-        ipc.start(handler)?;
+        ipc.start(handler, self.config.worker_threads)?;
 
         // Start metrics server (Prometheus + dashboard)
         {
@@ -244,8 +244,12 @@ fn handle_client(
         ClientMessage::CacheSwitch { algorithm } => {
             handle_cache_switch(stream, cache, &algorithm)
         }
-        ClientMessage::CacheBenchmark { iterations } => {
-            handle_cache_benchmark(stream, storage, cache, iterations)
+        ClientMessage::CacheBenchmark { iterations, sweep } => {
+            if sweep {
+                handle_cache_sweep(stream, storage, cache, iterations)
+            } else {
+                handle_cache_benchmark(stream, storage, cache, iterations)
+            }
         }
         ClientMessage::Stop => {
             let resp = if running.load(Ordering::SeqCst) {
@@ -857,6 +861,88 @@ fn handle_cache_benchmark(
             iterations,
         },
     );
+    Ok(())
+}
+
+/// Handle CacheBenchmark with --sweep: test multiple capacities.
+/// Sweeps through capacities [2,4,8,16,32,64,128,256,512], runs each
+/// algorithm at each capacity, returns hit-rate matrix sorted by hit rate.
+fn handle_cache_sweep(
+    stream: &mut UnixStream,
+    storage: &SharedStorage,
+    cache: &Arc<ObjectCache>,
+    iterations: usize,
+) -> Result<()> {
+    info!("Cache sweep benchmark requested ({} iterations)", iterations);
+
+    let object_uuids: Vec<String> = {
+        let mut st = storage.lock().unwrap();
+        match st.list() {
+            Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
+            Err(e) => {
+                let _ = ipc::send_response(stream, &ServerMessage::Error {
+                    code: "BENCHMARK_ERROR".to_string(),
+                    message: format!("Cannot list objects: {}", e),
+                });
+                return Ok(());
+            }
+        }
+    };
+
+    if object_uuids.is_empty() {
+        let _ = ipc::send_response(stream, &ServerMessage::Error {
+            code: "NO_OBJECTS".to_string(),
+            message: "No objects stored. Upload some first.".to_string(),
+        });
+        return Ok(());
+    }
+
+    let n = object_uuids.len();
+    let workload: Vec<String> = (0..iterations).map(|i| object_uuids[i % n].clone()).collect();
+
+    // Preload up to 32 objects for fair comparison
+    let max_preload = 32;
+    let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
+    {
+        let mut st = storage.lock().unwrap();
+        for uuid in object_uuids.iter().take(max_preload) {
+            if let Ok((_info, data)) = st.get(uuid) {
+                preloaded.push((uuid.clone(), CachedObject {
+                    uuid: uuid.clone(), data,
+                    name: "bench".to_string(), content_type: "octet-stream".to_string(),
+                    size: 0, tags: "{}".to_string(),
+                }));
+            }
+        }
+    }
+
+    let capacities: &[usize] = &[2, 4, 8, 16, 32, 64, 128, 256, 512];
+    let mut rows: Vec<ipc::CacheSweepRow> = Vec::new();
+
+    for &cap in capacities {
+        for alg in CacheAlgorithmType::all() {
+            let bench_cache = ObjectCache::new(*alg, cap);
+            let result = bench_cache.benchmark_run(&workload, &preloaded);
+            rows.push(ipc::CacheSweepRow {
+                algorithm: alg.as_str().to_string(),
+                capacity: cap,
+                hits: result.hits,
+                misses: result.misses,
+                hit_rate: result.hit_rate,
+            });
+            info!("  sweep {:>4} cap={:>3}: hits={} misses={} hit_rate={:.2}%",
+                alg.as_str(), cap, result.hits, result.misses, result.hit_rate);
+        }
+    }
+
+    // Sort by hit rate descending
+    rows.sort_by(|a, b| b.hit_rate.partial_cmp(&a.hit_rate).unwrap_or(std::cmp::Ordering::Equal));
+
+    let _ = ipc::send_response(stream, &ServerMessage::CacheBenchmarkSweep {
+        rows,
+        workload_keys: n,
+        iterations,
+    });
     Ok(())
 }
 

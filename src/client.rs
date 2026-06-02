@@ -56,8 +56,8 @@ impl Client {
                 self.cmd_cache_switch(algorithm)
             }
 
-            crate::config::ClientCommand::CacheBenchmark { iterations } => {
-                self.cmd_cache_benchmark(*iterations)
+            crate::config::ClientCommand::CacheBenchmark { iterations, sweep } => {
+                self.cmd_cache_benchmark(*iterations, *sweep)
             }
 
             crate::config::ClientCommand::Start { daemon } => {
@@ -523,9 +523,10 @@ impl Client {
     }
 
     // --- CACHE BENCHMARK ---
-    fn cmd_cache_benchmark(&self, iterations: usize) -> Result<()> {
-        println!("Running cache benchmark ({} iterations)...\n", iterations);
-        let response = self.ipc.request(&ClientMessage::CacheBenchmark { iterations })?;
+    fn cmd_cache_benchmark(&self, iterations: usize, sweep: bool) -> Result<()> {
+        let mode = if sweep { "sweep" } else { "standard" };
+        println!("Running cache benchmark ({} iterations, {} mode)...\n", iterations, mode);
+        let response = self.ipc.request(&ClientMessage::CacheBenchmark { iterations, sweep })?;
         match response {
             ServerMessage::CacheBenchmarkResult {
                 benchmarks,
@@ -557,6 +558,31 @@ impl Client {
                 println!();
                 if let Some(best) = benchmarks.first() {
                     println!("  Best algorithm: {} ({:.2}% hit rate)", best.algorithm, best.hit_rate);
+                }
+            }
+            ServerMessage::CacheBenchmarkSweep {
+                rows,
+                workload_keys,
+                iterations: actual_iters,
+            } => {
+                println!("  Workload:  {} unique objects, {} iterations", workload_keys, actual_iters);
+                println!();
+                // Group by capacity for readability
+                println!("  {:<8} {:<8} {:<10} {:<10} {:<10}",
+                         "Capacity", "Alg", "Hits", "Misses", "Hit Rate");
+                println!("  {:-<52}", "");
+                for row in &rows {
+                    println!(
+                        "  {:<8} {:<8} {:<10} {:<10} {:.2}%",
+                        row.capacity, row.algorithm, row.hits, row.misses, row.hit_rate,
+                    );
+                }
+                println!();
+                // Show the top 3 overall
+                println!("  Top 3 (algorithm, capacity) configurations:");
+                for (i, row) in rows.iter().take(3).enumerate() {
+                    println!("    {}. {} @ cap={} → {:.2}% hit rate",
+                             i + 1, row.algorithm, row.capacity, row.hit_rate);
                 }
             }
             ServerMessage::Error { code, message } => {

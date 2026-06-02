@@ -60,6 +60,10 @@ pub struct CliArgs {
     #[arg(long, default_value = "9090")]
     pub metrics_port: u16,
 
+    /// Number of worker threads in the MP-MC thread pool (default 4)
+    #[arg(long, default_value = "4")]
+    pub worker_threads: usize,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -133,6 +137,9 @@ pub enum ClientCommand {
         /// Number of random GET iterations to simulate
         #[arg(short = 'n', long = "iterations", default_value = "100")]
         iterations: usize,
+        /// Sweep mode: test multiple capacities (2,4,8,16,32,64,128,256,512)
+        #[arg(long = "sweep")]
+        sweep: bool,
     },
 
     /// Start the server (as daemon)
@@ -162,6 +169,7 @@ impl Default for CliArgs {
             cache_resize: 0,
             cache_warmup: 0,
             metrics_port: 9090,
+            worker_threads: 4,
             log_level: "info".to_string(),
             daemonize: false,
             pid_file: "/tmp/minios.pid".to_string(),
