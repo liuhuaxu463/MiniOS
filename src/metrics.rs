@@ -62,7 +62,7 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
 
     match (method, path) {
         ("GET", "/metrics") =>
-            respond(&mut stream, "200 OK", "text/plain; version=0.0.4",
+            respond(&mut stream, "200 OK", "text/plain; version=0.0.4; charset=utf-8",
                     &build_metrics(storage, cache, shm, start_time)),
         ("GET", "/") =>
             respond(&mut stream, "200 OK", "text/html; charset=utf-8",
@@ -318,12 +318,17 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
 // ============================================================================
 
 fn page(title: &str, body: &str) -> String {
+    page_with_refresh(title, body, false)
+}
+
+fn page_with_refresh(title: &str, body: &str, auto_refresh: bool) -> String {
+    let refresh_tag = if auto_refresh { "<meta http-equiv=\"refresh\" content=\"5\">" } else { "" };
     format!(r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MiniOS - {}</title>
+{}<title>MiniOS - {}</title>
 <style>
 /* === Reset & Base === */
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -458,11 +463,12 @@ textarea {{ resize: vertical; min-height: 120px; }}
 
 </body>
 </html>"##,
+    refresh_tag,
     title,
-    if title.contains("总览") { "class='active'" } else { "" },
-    if title.contains("管理") || title.contains("上传") || title.contains("下载") || title.contains("删除") || title.contains("性能") || title.contains("缓存") { "class='active'" } else { "" },
+    if title.contains("总览") {{ "class='active'" }} else {{ "" }},
+    if title.contains("管理") || title.contains("上传") || title.contains("下载") || title.contains("删除") || title.contains("性能") || title.contains("缓存") {{ "class='active'" }} else {{ "" }},
     title, body, env!("CARGO_PKG_VERSION"))
-}
+}}
 
 // ============================================================================
 // Page builders
@@ -496,7 +502,7 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
 <div class="stat-item"><div class="stat-value">{:.1}%</div><div class="stat-label">命中率</div></div>
 </div>
 
-<h2 style="margin-top:24px"><span class="icon">📤</span> 上传对象</h2>
+<h2 style="margin-top:24px">上传对象</h2>
 <form method="POST" action="/api/put">
   <label>对象名称</label>
   <input name="name" required placeholder="例如：my-document.txt">
@@ -509,7 +515,7 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
   <button class="btn btn-primary" type="submit">上传</button>
 </form>
 
-<h2 style="margin-top:24px"><span class="icon">⚙️</span> 缓存控制</h2>
+<h2 style="margin-top:24px">缓存控制</h2>
 <form method="POST" action="/api/resize" style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap">
   <div style="flex:1;min-width:200px">
     <label>缓存容量（当前 {}）</label>
@@ -517,9 +523,9 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
   </div>
   <button class="btn btn-primary" type="submit" style="flex-shrink:0">调整容量</button>
 </form>
-<a class="btn btn-primary" href="/api/benchmark">▶ 运行性能测试</a>
+<a class="btn btn-primary" href="/api/benchmark">运行性能测试</a>
 
-<h2 style="margin-top:24px"><span class="icon">📦</span> 对象列表（共 {} 个）</h2>
+<h2 style="margin-top:24px">对象列表（共 {} 个）</h2>
 <table><tr><th>名称</th><th>UUID</th><th>大小</th><th>类型</th><th>创建时间</th></tr>{}</table>
 <p style="color:#8590a6;margin-top:8px">存储用量：{} / {} 块（{} 每块）</p>"##,
         status.object_count,
@@ -539,7 +545,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
     let cs = cache.stats();
     let uptime = start_time.elapsed().as_secs();
 
-    page("系统总览", &format!(
+    page_with_refresh("系统总览", &format!(
         r##"<div class="stats-grid">
 <div class="stat-item"><div class="stat-value">{}</div><div class="stat-label">运行时间</div></div>
 <div class="stat-item"><div class="stat-value">{}</div><div class="stat-label">对象总数</div></div>
@@ -547,7 +553,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
 <div class="stat-item"><div class="stat-value">{}</div><div class="stat-label">缓存算法</div></div>
 </div>
 
-<h2>💾 存储</h2>
+<h2>存储</h2>
 <table>
 <tr><td>已用容量</td><td>{} / {}（{:.1}%）</td></tr>
 <tr><td colspan="2"><div class="bar"><div class="bar-fill bar-green" style="width:{:.1}%"></div></div></td></tr>
@@ -555,7 +561,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
 <tr><td>对象数</td><td>{} / {}（上限）</td></tr>
 </table>
 
-<h2>🗄️ 缓存 — {} 算法</h2>
+<h2>缓存 — {} 算法</h2>
 <table>
 <tr><td>当前条目 / 容量</td><td>{} / {}</td></tr>
 <tr><td>命中 / 未命中</td><td>{} / {}</td></tr>
@@ -563,7 +569,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
 <tr><td>命中率</td><td><strong>{:.2}%</strong></td></tr>
 </table>
 
-<h2>🧠 共享内存</h2>
+<h2>共享内存</h2>
 <table>
 <tr><td>空闲页 / 总页数</td><td>{} / {}</td></tr>
 <tr><td>页大小</td><td>4 KB</td></tr>
@@ -580,7 +586,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
         cs.algorithm, cs.size, cs.capacity, cs.hits, cs.misses,
         cs.evictions, cs.hit_rate(),
         shm.free_page_count(), shm.num_pages(),
-    ))
+    ), true)
 }
 
 // ============================================================================
