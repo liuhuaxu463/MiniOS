@@ -870,7 +870,7 @@ fn handle_cache_benchmark(
 fn handle_cache_sweep(
     stream: &mut UnixStream,
     storage: &SharedStorage,
-    cache: &Arc<ObjectCache>,
+    _cache: &Arc<ObjectCache>,
     iterations: usize,
 ) -> Result<()> {
     info!("Cache sweep benchmark requested ({} iterations)", iterations);

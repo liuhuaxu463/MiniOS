@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -387,7 +387,7 @@ impl IpcServer {
         );
 
         // Bounded channel as the work queue: accept thread → channel → workers
-        let (tx, rx): (mpsc::Sender<UnixStream>, mpsc::Receiver<UnixStream>) =
+        let (tx, rx): (mpsc::SyncSender<UnixStream>, mpsc::Receiver<UnixStream>) =
             mpsc::sync_channel(nw * 2);
 
         // Spawn worker threads (consumers).
