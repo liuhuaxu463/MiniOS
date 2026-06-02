@@ -828,16 +828,21 @@ fn handle_cache_benchmark(
     for alg in CacheAlgorithmType::all() {
         let bench_cache = ObjectCache::new(*alg, cap);
         let bench = bench_cache.benchmark_run(&workload, &preloaded);
+        let alg_name = bench.algorithm.clone();
+        let hits = bench.hits;
+        let misses = bench.misses;
+        let evictions = bench.evictions;
+        let hit_rate = bench.hit_rate;
         results.push(ipc::CacheBenchmarkEntry {
             algorithm: bench.algorithm,
-            hits: bench.hits,
-            misses: bench.misses,
-            evictions: bench.evictions,
-            hit_rate: bench.hit_rate,
+            hits,
+            misses,
+            evictions,
+            hit_rate,
         });
         info!(
             "  {:>4}: hits={} misses={} evictions={} hit_rate={:.2}%",
-            bench.algorithm, bench.hits, bench.misses, bench.evictions, bench.hit_rate,
+            alg_name, hits, misses, evictions, hit_rate,
         );
     }
 

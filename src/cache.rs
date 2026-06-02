@@ -411,12 +411,13 @@ impl ObjectCache {
         }
 
         let stats = self.stats();
+        let hit_rate = stats.hit_rate();
         AlgorithmBenchmark {
             algorithm: stats.algorithm,
             hits: stats.hits,
             misses: stats.misses,
             evictions: stats.evictions,
-            hit_rate: stats.hit_rate(),
+            hit_rate,
             final_size: stats.size,
         }
     }

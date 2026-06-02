@@ -542,11 +542,16 @@ impl Client {
                         0 => "🥇 1st",
                         1 => "🥈 2nd",
                         2 => "🥉 3rd",
-                        _ => format!("  {}.", i + 1),
+                        _ => "",
+                    };
+                    let rank_str = if rank.is_empty() {
+                        format!("  {}.", i + 1)
+                    } else {
+                        rank.to_string()
                     };
                     println!(
                         "  {:<6} {:<12} {:<12} {:<12} {:.2}%",
-                        rank, b.algorithm, b.hits, b.misses, b.hit_rate,
+                        rank_str, b.algorithm, b.hits, b.misses, b.hit_rate,
                     );
                 }
                 println!();
