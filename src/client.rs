@@ -538,16 +538,16 @@ impl Client {
                          "Rank", "Algorithm", "Hits", "Misses", "Hit Rate");
                 println!("  {:-<60}", "");
                 for (i, b) in benchmarks.iter().enumerate() {
-                    let rank = match i {
-                        0 => "🥇 1st",
-                        1 => "🥈 2nd",
-                        2 => "🥉 3rd",
+                    let rank_str = match i {
+                        0 => "1st",
+                        1 => "2nd",
+                        2 => "3rd",
                         _ => "",
                     };
-                    let rank_str = if rank.is_empty() {
-                        format!("  {}.", i + 1)
+                    let rank_str = if rank_str.is_empty() {
+                        format!("{}.", i + 1)
                     } else {
-                        rank.to_string()
+                        rank_str.to_string()
                     };
                     println!(
                         "  {:<6} {:<12} {:<12} {:<12} {:.2}%",
