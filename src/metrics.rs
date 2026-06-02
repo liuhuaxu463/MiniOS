@@ -468,7 +468,7 @@ textarea {{ resize: vertical; min-height: 120px; }}
     if title.contains("总览") {{ "class='active'" }} else {{ "" }},
     if title.contains("管理") || title.contains("上传") || title.contains("下载") || title.contains("删除") || title.contains("性能") || title.contains("缓存") {{ "class='active'" }} else {{ "" }},
     title, body, env!("CARGO_PKG_VERSION"))
-}}
+}
 
 // ============================================================================
 // Page builders
