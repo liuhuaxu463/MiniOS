@@ -4,7 +4,7 @@
 # 使用方法: chmod +x test.sh && ./test.sh
 # ============================================================================
 
-set -euo pipefail
+set -eu
 
 # 颜色输出
 RED='\033[0;31m'
@@ -19,7 +19,7 @@ FAIL=0
 MINIOS="./target/release/minios"
 SERVER_PID=""
 SOCKET="/tmp/minios_test.sock"
-SHM="/minios_test_shm"
+SHM="/minios_shm"
 STORE="./test_store.odb"
 PID_FILE="/tmp/minios_test.pid"
 TEST_DIR="/tmp/minios_test_files"
