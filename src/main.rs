@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod error;
 mod ipc;
+mod metrics;
 mod server;
 mod shm;
 mod storage;

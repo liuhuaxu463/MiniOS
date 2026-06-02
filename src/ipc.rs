@@ -10,6 +10,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// A single entry in a cache benchmark result (used in ServerMessage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheBenchmarkEntry {
+    pub algorithm: String,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub hit_rate: f64,
+}
+
 // ============================================================================
 // IPC Message Protocol
 // ============================================================================
@@ -61,6 +71,22 @@ pub enum ClientMessage {
         uuid: String,
         error: String,
     },
+
+    /// Resize cache at runtime
+    CacheResize {
+        capacity: usize,
+    },
+
+    /// Switch cache algorithm at runtime
+    CacheSwitch {
+        algorithm: String,
+    },
+
+    /// Run cache algorithm benchmark
+    CacheBenchmark {
+        /// Number of iterations for the simulated workload
+        iterations: usize,
+    },
 }
 
 /// Response messages sent from server to client
@@ -109,11 +135,22 @@ pub enum ServerMessage {
         cache_hits: u64,
         cache_misses: u64,
         cache_hit_rate: f64,
+        cache_evictions: u64,
         cache_size: usize,
         cache_capacity: usize,
+        cache_algorithm: String,
         shm_pages_total: u32,
         shm_pages_free: u32,
         uptime_seconds: u64,
+    },
+
+    /// Cache benchmark result comparing all algorithms
+    CacheBenchmarkResult {
+        benchmarks: Vec<CacheBenchmarkEntry>,
+        /// Number of unique keys in the benchmark workload
+        workload_keys: usize,
+        /// Total iterations run
+        iterations: usize,
     },
 
     /// Shared memory allocation for data transfer

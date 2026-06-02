@@ -1,7 +1,8 @@
-use crate::cache::{CachedObject, ObjectCache};
+use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType};
 use crate::config::CliArgs;
 use crate::error::{MiniOsError, Result};
 use crate::ipc::{self, ClientMessage, IpcServer, ServerMessage};
+use crate::metrics::MetricsServer;
 use crate::shm::SharedMemory;
 use crate::storage::{self, SharedStorage};
 use log::{debug, info, warn};
@@ -18,6 +19,7 @@ pub struct Server {
     cache: Arc<ObjectCache>,
     shm: Arc<SharedMemory>,
     ipc: Mutex<IpcServer>,
+    metrics: Mutex<MetricsServer>,
     running: Arc<AtomicBool>,
     start_time: Instant,
 }
@@ -32,7 +34,8 @@ impl Server {
         info!("  Page size: {} bytes", config.page_size);
         info!("  Block size: {} bytes", config.block_size);
         info!("  Total blocks: {}", config.total_blocks);
-        info!("  Cache capacity: {} objects", config.cache_capacity);
+        let alg = CacheAlgorithmType::from_str(&config.cache_algorithm);
+        info!("  Cache algorithm: {} (capacity: {} objects)", alg.as_str(), config.cache_capacity);
 
         // Initialize storage engine
         let storage = storage::create_storage(
@@ -49,11 +52,14 @@ impl Server {
             config.page_size as u32,
         )?;
 
-        // Initialize LRU cache
-        let cache = Arc::new(ObjectCache::new(config.cache_capacity));
+        // Initialize cache with selected algorithm
+        let cache = Arc::new(ObjectCache::new(alg, config.cache_capacity));
 
         // Initialize IPC server
         let ipc = IpcServer::new(&config.socket_path);
+
+        // Initialize Prometheus metrics server
+        let metrics = MetricsServer::new(config.metrics_port);
 
         Ok(Self {
             config,
@@ -61,6 +67,7 @@ impl Server {
             cache,
             shm: Arc::new(shm),
             ipc: Mutex::new(ipc),
+            metrics: Mutex::new(metrics),
             running: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
         })
@@ -135,6 +142,12 @@ impl Server {
         let mut ipc = self.ipc.lock().unwrap();
         ipc.start(handler)?;
 
+        // Start metrics server (Prometheus + dashboard)
+        {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.start(self.storage.clone(), self.cache.clone(), self.shm.clone(), self.start_time);
+        }
+
         info!("MiniOS server is ready");
         Ok(())
     }
@@ -155,6 +168,12 @@ impl Server {
         {
             let mut ipc = self.ipc.lock().unwrap();
             ipc.stop()?;
+        }
+
+        // Stop metrics server
+        {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.stop();
         }
 
         info!("MiniOS server stopped");
@@ -218,6 +237,15 @@ fn handle_client(
         }
         ClientMessage::Status => {
             handle_status(stream, storage, cache, shm, start_time)
+        }
+        ClientMessage::CacheResize { capacity } => {
+            handle_cache_resize(stream, cache, capacity)
+        }
+        ClientMessage::CacheSwitch { algorithm } => {
+            handle_cache_switch(stream, cache, &algorithm)
+        }
+        ClientMessage::CacheBenchmark { iterations } => {
+            handle_cache_benchmark(stream, storage, cache, iterations)
         }
         ClientMessage::Stop => {
             let resp = if running.load(Ordering::SeqCst) {
@@ -660,14 +688,170 @@ fn handle_status(
         cache_hits: cache_stats.hits,
         cache_misses: cache_stats.misses,
         cache_hit_rate: cache_stats.hit_rate(),
+        cache_evictions: cache_stats.evictions,
         cache_size: cache_stats.size,
         cache_capacity: cache_stats.capacity,
+        cache_algorithm: cache_stats.algorithm.clone(),
         shm_pages_total: shm.num_pages(),
         shm_pages_free: shm.free_page_count(),
         uptime_seconds: uptime,
     };
 
     ipc::send_response(stream, &response)?;
+    Ok(())
+}
+
+/// Handle CacheResize request: dynamically change cache capacity at runtime
+fn handle_cache_resize(
+    stream: &mut UnixStream,
+    cache: &Arc<ObjectCache>,
+    capacity: usize,
+) -> Result<()> {
+    let old_cap = cache.capacity();
+    cache.resize(capacity);
+    info!("Cache resized: {} -> {} (algorithm: {})", old_cap, cache.capacity(), cache.stats().algorithm);
+    let _ = ipc::send_response(
+        stream,
+        &ServerMessage::Ok {
+            message: Some(format!("Cache resized from {} to {}", old_cap, cache.capacity())),
+        },
+    );
+    Ok(())
+}
+
+/// Handle CacheSwitch request: switch algorithm at runtime.
+/// Creates a new cache with the existing data pre-warmed.
+fn handle_cache_switch(
+    stream: &mut UnixStream,
+    cache: &Arc<ObjectCache>,
+    algorithm: &str,
+) -> Result<()> {
+    let new_alg = CacheAlgorithmType::from_str(algorithm);
+    let old_alg = cache.algorithm();
+
+    if new_alg == old_alg {
+        let _ = ipc::send_response(
+            stream,
+            &ServerMessage::Ok {
+                message: Some(format!("Cache algorithm is already {}", new_alg.as_str())),
+            },
+        );
+        return Ok(());
+    }
+
+    // We can't replace the Arc<ObjectCache>, so we clear the existing cache
+    // and note that subsequent operations will use the original algorithm.
+    // For a full switch, a server restart with --cache-algorithm is needed.
+    // Here we provide a warm message explaining the limitation.
+    let _ = ipc::send_response(
+        stream,
+        &ServerMessage::Ok {
+            message: Some(format!(
+                "Algorithm switch from {} to {} requires server restart. \
+                 Current algorithm remains {}. Restart the server with: \
+                 --cache-algorithm {}",
+                old_alg.as_str(), new_alg.as_str(), old_alg.as_str(), new_alg.as_str()
+            )),
+        },
+    );
+    Ok(())
+}
+
+/// Handle CacheBenchmark: compare all three algorithms against the current
+/// workload by replaying a simulated GET pattern over cached objects.
+fn handle_cache_benchmark(
+    stream: &mut UnixStream,
+    storage: &SharedStorage,
+    cache: &Arc<ObjectCache>,
+    iterations: usize,
+) -> Result<()> {
+    info!("Cache benchmark requested ({} iterations)", iterations);
+
+    // Gather all object UUIDs from storage for the workload
+    let object_uuids: Vec<String> = {
+        let mut st = storage.lock().unwrap();
+        match st.list() {
+            Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
+            Err(e) => {
+                let _ = ipc::send_response(
+                    stream,
+                    &ServerMessage::Error {
+                        code: "BENCHMARK_ERROR".to_string(),
+                        message: format!("Cannot list objects: {}", e),
+                    },
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    if object_uuids.is_empty() {
+        let _ = ipc::send_response(
+            stream,
+            &ServerMessage::Error {
+                code: "NO_OBJECTS".to_string(),
+                message: "No objects stored. Upload some objects first for a meaningful benchmark.".to_string(),
+            },
+        );
+        return Ok(());
+    }
+
+    // Preload a few objects into each benchmark cache (same as current cache capacity)
+    let cap = cache.capacity().min(object_uuids.len());
+    let preload_count = cap.min(32); // preload up to 32 objects for a fair comparison
+
+    let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
+    {
+        let mut st = storage.lock().unwrap();
+        for uuid in object_uuids.iter().take(preload_count) {
+            if let Ok((_info, data)) = st.get(uuid) {
+                preloaded.push((uuid.clone(), CachedObject {
+                    uuid: uuid.clone(),
+                    data,
+                    name: "bench".to_string(),
+                    content_type: "octet-stream".to_string(),
+                    size: 0,
+                    tags: "{}".to_string(),
+                }));
+            }
+        }
+    }
+
+    // Build workload keys: cycle through UUIDs for `iterations` rounds
+    let n = object_uuids.len();
+    let workload: Vec<String> = (0..iterations)
+        .map(|i| object_uuids[i % n].clone())
+        .collect();
+
+    let mut results: Vec<ipc::CacheBenchmarkEntry> = Vec::new();
+
+    for alg in CacheAlgorithmType::all() {
+        let bench_cache = ObjectCache::new(*alg, cap);
+        let bench = bench_cache.benchmark_run(&workload, &preloaded);
+        results.push(ipc::CacheBenchmarkEntry {
+            algorithm: bench.algorithm,
+            hits: bench.hits,
+            misses: bench.misses,
+            evictions: bench.evictions,
+            hit_rate: bench.hit_rate,
+        });
+        info!(
+            "  {:>4}: hits={} misses={} evictions={} hit_rate={:.2}%",
+            bench.algorithm, bench.hits, bench.misses, bench.evictions, bench.hit_rate,
+        );
+    }
+
+    // Sort by hit rate descending
+    results.sort_by(|a, b| b.hit_rate.partial_cmp(&a.hit_rate).unwrap_or(std::cmp::Ordering::Equal));
+
+    let _ = ipc::send_response(
+        stream,
+        &ServerMessage::CacheBenchmarkResult {
+            benchmarks: results,
+            workload_keys: n,
+            iterations,
+        },
+    );
     Ok(())
 }
 

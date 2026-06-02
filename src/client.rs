@@ -48,6 +48,18 @@ impl Client {
                 self.cmd_status()
             }
 
+            crate::config::ClientCommand::CacheResize { capacity } => {
+                self.cmd_cache_resize(*capacity)
+            }
+
+            crate::config::ClientCommand::CacheSwitch { algorithm } => {
+                self.cmd_cache_switch(algorithm)
+            }
+
+            crate::config::ClientCommand::CacheBenchmark { iterations } => {
+                self.cmd_cache_benchmark(*iterations)
+            }
+
             crate::config::ClientCommand::Start { daemon } => {
                 self.cmd_start(*daemon)
             }
@@ -414,8 +426,10 @@ impl Client {
                 cache_hits,
                 cache_misses,
                 cache_hit_rate,
+                cache_evictions,
                 cache_size,
                 cache_capacity,
+                cache_algorithm,
                 shm_pages_total,
                 shm_pages_free,
                 uptime_seconds,
@@ -447,12 +461,14 @@ impl Client {
                 );
                 println!();
                 println!("  --- Cache ---");
+                println!("  Algorithm:        {}", cache_algorithm);
                 println!(
                     "  Entries:          {} / {}",
                     cache_size, cache_capacity
                 );
                 println!("  Hits:             {}", cache_hits);
                 println!("  Misses:           {}", cache_misses);
+                println!("  Evictions:        {}", cache_evictions);
                 println!("  Hit rate:         {:.2}%", cache_hit_rate);
                 println!();
                 println!("  --- Shared Memory ---");
@@ -469,6 +485,80 @@ impl Client {
             }
         }
 
+        Ok(())
+    }
+
+    // --- CACHE RESIZE ---
+    fn cmd_cache_resize(&self, capacity: usize) -> Result<()> {
+        println!("Resizing cache to {} entries...", capacity);
+        let response = self.ipc.request(&ClientMessage::CacheResize { capacity })?;
+        match response {
+            ServerMessage::Ok { message } => {
+                println!("✓ {}", message.unwrap_or_default());
+            }
+            ServerMessage::Error { code, message } => {
+                eprintln!("Error [{}]: {}", code, message);
+            }
+            _ => { eprintln!("Unexpected response: {:?}", response); }
+        }
+        Ok(())
+    }
+
+    // --- CACHE SWITCH ---
+    fn cmd_cache_switch(&self, algorithm: &str) -> Result<()> {
+        println!("Switching cache algorithm to {}...", algorithm);
+        let response = self.ipc.request(&ClientMessage::CacheSwitch {
+            algorithm: algorithm.to_string(),
+        })?;
+        match response {
+            ServerMessage::Ok { message } => {
+                println!("✓ {}", message.unwrap_or_default());
+            }
+            ServerMessage::Error { code, message } => {
+                eprintln!("Error [{}]: {}", code, message);
+            }
+            _ => { eprintln!("Unexpected response: {:?}", response); }
+        }
+        Ok(())
+    }
+
+    // --- CACHE BENCHMARK ---
+    fn cmd_cache_benchmark(&self, iterations: usize) -> Result<()> {
+        println!("Running cache benchmark ({} iterations)...\n", iterations);
+        let response = self.ipc.request(&ClientMessage::CacheBenchmark { iterations })?;
+        match response {
+            ServerMessage::CacheBenchmarkResult {
+                benchmarks,
+                workload_keys,
+                iterations: actual_iters,
+            } => {
+                println!("  Workload:  {} unique objects, {} iterations", workload_keys, actual_iters);
+                println!();
+                println!("  {:<6} {:<12} {:<12} {:<12} {:<12}",
+                         "Rank", "Algorithm", "Hits", "Misses", "Hit Rate");
+                println!("  {:-<60}", "");
+                for (i, b) in benchmarks.iter().enumerate() {
+                    let rank = match i {
+                        0 => "🥇 1st",
+                        1 => "🥈 2nd",
+                        2 => "🥉 3rd",
+                        _ => format!("  {}.", i + 1),
+                    };
+                    println!(
+                        "  {:<6} {:<12} {:<12} {:<12} {:.2}%",
+                        rank, b.algorithm, b.hits, b.misses, b.hit_rate,
+                    );
+                }
+                println!();
+                if let Some(best) = benchmarks.first() {
+                    println!("  Best algorithm: {} ({:.2}% hit rate)", best.algorithm, best.hit_rate);
+                }
+            }
+            ServerMessage::Error { code, message } => {
+                eprintln!("Error [{}]: {}", code, message);
+            }
+            _ => { eprintln!("Unexpected response: {:?}", response); }
+        }
         Ok(())
     }
 
