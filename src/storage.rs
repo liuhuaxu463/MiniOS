@@ -667,12 +667,16 @@ impl ObjectStorage {
             let chunk = &data[start..end];
 
             self.file.seek(SeekFrom::Start(offset))?;
-            self.file.write_all(chunk)?;
 
-            // Zero-fill the rest of the block if data doesn't fill it
-            if chunk.len() < block_size as usize {
-                let padding = vec![0u8; block_size as usize - chunk.len()];
-                self.file.write_all(&padding)?;
+            // Always zero-fill the full block first, then write the data
+            // chunk. This prevents residual data from previously freed
+            // blocks from leaking into reads.
+            let padding_len = block_size as usize - chunk.len();
+            self.file.write_all(chunk)?;
+            if padding_len > 0 {
+                // Zero the remainder efficiently in one write
+                let zeros = vec![0u8; padding_len];
+                self.file.write_all(&zeros)?;
             }
         }
 
@@ -699,10 +703,10 @@ impl ObjectStorage {
     pub fn find_info(&mut self, key: &str) -> Result<ObjectInfo> {
         let entry = self
             .find_entry(key)?
-            .ok_or_else(|| MiniOsError::NotFound(format!("Object not found: {}", key)))?;
+            .ok_or_else(|| MiniOsError::NotFound(key.to_string()))?;
 
         if entry.flags & META_FLAG_DELETED != 0 {
-            return Err(MiniOsError::NotFound(format!("Object not found: {}", key)));
+            return Err(MiniOsError::NotFound(key.to_string()));
         }
         Ok(entry.to_object_info())
     }
@@ -988,40 +992,29 @@ impl ObjectStorage {
         Ok(entries)
     }
 
-    /// Write a metadata entry to the metadata area
-    /// Tries to reuse space from a deleted entry first
+    /// Write a metadata entry to the metadata area.
+    ///
+    /// Always appends at the end of the metadata area. Deleted entries
+    /// are left in place and skipped during scan (their flags mark them).
+    /// Reusing deleted slots is deliberately avoided because it risks
+    /// leaving trailing garbage bytes from the old entry when the new
+    /// entry is smaller, which would break the sequential scan.
     fn write_metadata_entry(&mut self, entry_bytes: &[u8]) -> Result<()> {
         let metadata_offset = self.metadata_offset();
         let entry_size = entry_bytes.len() as u64;
 
-        // Try to find a deleted entry with enough space
-        let mut reuse_offset: Option<u64> = None;
-        let entries = self.scan_all_entries_with_offsets()?;
-        for (entry, offset) in entries {
-            if entry.flags & META_FLAG_DELETED != 0
-                && entry.entry_size as u64 >= entry_size
-            {
-                reuse_offset = Some(offset);
-                break;
-            }
-        }
+        // Always append at end of metadata area
+        let write_offset = metadata_offset + self.super_block.metadata_area_size;
 
-        let write_offset = if let Some(off) = reuse_offset {
-            off
-        } else {
-            // Append at end of metadata area
-            let off = metadata_offset + self.super_block.metadata_area_size;
-            // Check if we have space
-            if self.super_block.metadata_area_size + entry_size
-                > self.super_block.max_metadata_area_size
-            {
-                return Err(MiniOsError::Storage(
-                    "Metadata area full: cannot store more objects".to_string(),
-                ));
-            }
-            self.super_block.metadata_area_size += entry_size;
-            off
-        };
+        // Check if we have space
+        if self.super_block.metadata_area_size + entry_size
+            > self.super_block.max_metadata_area_size
+        {
+            return Err(MiniOsError::Storage(
+                "Metadata area full: cannot store more objects".to_string(),
+            ));
+        }
+        self.super_block.metadata_area_size += entry_size;
 
         // Write the entry
         self.file.seek(SeekFrom::Start(write_offset))?;

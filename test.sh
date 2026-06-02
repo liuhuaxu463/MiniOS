@@ -49,8 +49,9 @@ assert_fail() {
     echo -e "    ${RED}✗ FAIL${NC}: $1"
 }
 
-cleanup() {
-    print_step "清理测试环境..."
+# Full cleanup: deletes everything including the store database
+full_cleanup() {
+    print_step "完整清理（含 store.odb）..."
     # 停止可能残留的服务器
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill "$SERVER_PID" 2>/dev/null || true
@@ -62,7 +63,25 @@ cleanup() {
     fi
     rm -f "$SOCKET" "$STORE" "$PID_FILE"
     rm -rf "$TEST_DIR"
-    echo "  清理完成"
+    echo "  完整清理完成"
+}
+
+# Soft cleanup: stop server but KEEP the store database
+soft_cleanup() {
+    print_step "软清理（保留 store.odb 数据）..."
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    if [ -S "$SOCKET" ]; then
+        "$MINIOS" --socket-path "$SOCKET" stop 2>/dev/null || true
+    fi
+    rm -f "$SOCKET" "$PID_FILE"
+    echo "  软清理完成"
+}
+
+cleanup() {
+    full_cleanup
 }
 
 start_server() {
@@ -514,7 +533,7 @@ main() {
 
     print_step "重新启动服务器..."
     rm -f "$SOCKET" "$PID_FILE"
-    cleanup
+    soft_cleanup
 
     start_server
 
