@@ -209,9 +209,8 @@ main() {
 
     # ==== 3.1: PUT - 小文本文件 ====
     print_step "测试 PUT: 上传小文本文件..."
-    echo "Hello, MiniOS! This is a test file." > "$TEST_DIR/small.txt"
-    echo "第二行内容" >> "$TEST_DIR/small.txt"
-    echo "第三行内容" >> "$TEST_DIR/small.txt"
+    # 用 printf 精确控制内容，避免 echo / locale 差异导致 diff 失败
+    printf 'Hello, MiniOS! This is a test file.\nLine two\nLine three\n' > "$TEST_DIR/small.txt"
 
     PUT_OUT=$("$MINIOS" --socket-path "$SOCKET" put \
         --name "test-small" \
@@ -479,8 +478,7 @@ main() {
 
     # ==== 6.2: 中文内容 ====
     print_step "测试 PUT: 中文内容..."
-    echo "你好，MiniOS！这是一个中文测试文件。" > "$TEST_DIR/chinese.txt"
-    echo "对象存储服务测试" >> "$TEST_DIR/chinese.txt"
+    printf '你好，MiniOS！这是一个中文测试文件。\n对象存储服务测试\n' > "$TEST_DIR/chinese.txt"
 
     CN_OUT=$("$MINIOS" --socket-path "$SOCKET" put \
         --name "中文测试" \
