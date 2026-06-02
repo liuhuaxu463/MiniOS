@@ -8,16 +8,23 @@
 ┌──────────────────────────────────────────────────────┐
 │  CLI Client (client.rs)                              │
 │  put / get / delete / list / status / start / stop   │
+│  cache-resize / cache-switch / cache-benchmark       │
 └──────────┬──────────────────┬───────────────────────┘
            │ Unix Socket (IPC) │ Shared Memory (shm)
            ▼                   ▼
 ┌──────────────────────────────────────────────────────┐
 │  Server Daemon (server.rs)                           │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
-│  │ LRU Cache│ │ Shm Mgr  │ │  Storage Engine      │ │
-│  │ (cache)  │ │ (shm.rs) │ │  (storage.rs)        │ │
-│  │ 热点缓存 │ │ 页式分配 │ │  store.odb 持久化    │ │
+│  │ Multi-   │ │ Shm Mgr  │ │  Storage Engine      │ │
+│  │ Cache    │ │ (shm.rs) │ │  (storage.rs)        │ │
+│  │ LRU/FIFO │ │ 页式分配 │ │  store.odb 持久化    │ │
+│  │ /LFU     │ │          │ │                      │ │
 │  └──────────┘ └──────────┘ └──────────────────────┘ │
+│  ┌──────────────────────────────────────────────────┐│
+│  │ Prometheus 监控 (metrics.rs)                     ││
+│  │ GET :9090/metrics  → Prometheus 指标             ││
+│  │ GET :9090/         → HTML Dashboard              ││
+│  └──────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -77,15 +84,25 @@
 - **free_page()**：释放对象占用的页
 - **大对象分页传输**：大数据拆分为多个页，通过页号链表串联
 
-### LRU 缓存
-- **可配置容量**：通过命令行参数设置缓存对象数量
-- **命中率统计**：实时统计缓存命中/未命中/淘汰次数
-- **缓存预热**：启动时预加载最近访问的对象
+### 多缓存算法（Cache）
+- **三种淘汰策略**：LRU（最近最少使用）、FIFO（先进先出）、LFU（最不频繁使用）
+- **动态缩放**：运行时通过 `cache-resize` 命令调整缓存容量
+- **算法对比**：`cache-benchmark` 命令用当前 workload 实测三种算法并排名
+- **命中率统计**：实时统计 hits/misses/evictions/hit_rate
+- **缓存预热**：启动时通过 `--cache-warmup` 预加载最近访问的对象
+
+### Prometheus 监控与 Web Dashboard
+- **`/metrics` 端点**：标准 Prometheus 文本格式，可接入 Grafana
+- **HTML Dashboard**：自动刷新仪表板，展示存储/缓存/共享内存状态
+- **零依赖**：基于 `std::net::TcpListener`，无需额外 Web 框架
 
 ### 多客户端并发
 - **独立守护进程**：以 daemon 方式运行
 - **Unix Domain Socket IPC**：进程间通信
 - **线程池处理**：每个客户端连接分配独立线程
+- **日志系统**：基于 env_logger，支持多级别（trace~error）
+
+---
 
 ## 编译与运行
 
@@ -102,39 +119,38 @@ cargo build --release
 
 编译产物位于 `target/release/minios`。
 
+---
+
+## 使用指南
+
 ### 启动服务器
 
 ```bash
 # 前台运行（调试用）
-./minios --server
+./target/release/minios --server
 
-# 后台运行
-./minios --server --daemonize
-
-# 自定义配置
-./minios --server \
-  --store-path /data/minios/store.odb \
-  --socket-path /tmp/minios.sock \
-  --shm-name minios_shm \
-  --shm-size 33554432 \
-  --page-size 4096 \
-  --block-size 4096 \
-  --total-blocks 51200 \
+# 自定义缓存算法和容量
+./target/release/minios --server \
+  --cache-algorithm lfu \
   --cache-capacity 256 \
   --cache-warmup 10 \
   --log-level info
+
+# 启用 Prometheus 监控（默认端口 9090）
+./target/release/minios --server --metrics-port 9090
+
+# 禁用 Web 监控
+./target/release/minios --server --metrics-port 0
 ```
 
 ### 客户端命令
 
 ```bash
+# ─── 基本 CRUD ───
 # 上传文件
 ./minios put --name myfile.txt --file /path/to/file.txt --type text/plain --tags '{"author":"me"}'
 
-# 下载文件（按 UUID）
-./minios get --key 550e8400-e29b-41d4-a716-446655440000 --output downloaded.txt
-
-# 下载文件（按名称）
+# 下载文件（按 UUID 或名称均可）
 ./minios get --key myfile.txt --output downloaded.txt
 
 # 删除对象
@@ -142,17 +158,138 @@ cargo build --release
 
 # 列出所有对象
 ./minios list
-./minios list --long   # 详细信息
+./minios list --long            # 详细信息
 
 # 查看服务器状态
 ./minios status
 
-# 启动/停止服务器
-./minios start --daemon
-./minios stop
+# ─── 缓存管理 ───
+# 运行时动态调整缓存容量
+./minios cache-resize --capacity 512
+
+# 切换缓存算法（需重启服务器生效，命令会给出指引）
+./minios cache-switch --algorithm fifo
+
+# 运行缓存算法对比测试 —— 用当前所有对象模拟随机 GET 访问，对比 LRU/FIFO/LFU 的命中率
+./minios cache-benchmark --iterations 200
+
+# ─── 服务器启停 ───
+./minios start --daemon          # 后台启动
+./minios stop                    # 停止
 ```
 
-## 命令行参数
+---
+
+## 多缓存算法详解
+
+### 算法说明
+
+| 算法 | 淘汰策略 | 适用场景 |
+|------|----------|----------|
+| **LRU** (默认) | 淘汰最久未访问的条目 | 通用场景，适合热/冷数据分明的 workload |
+| **FIFO** | 淘汰最早插入的条目 | 数据无明显的冷热之分，按时间顺序淘汰 |
+| **LFU** | 淘汰访问次数最少的条目 | 少量热点 + 大量低频一次性的场景 |
+
+### 启动时选择算法
+
+```bash
+./target/release/minios --server --cache-algorithm lfu --cache-capacity 128
+```
+
+`--cache-algorithm` 取值：`lru`（默认）、`fifo`、`lfu`
+
+### 运行时动态缩放
+
+```bash
+# 扩容到 512
+./target/release/minios cache-resize --capacity 512
+
+# 缩容到 32（多余条目按当前算法淘汰）
+./target/release/minios cache-resize --capacity 32
+```
+
+### 算法对比 Benchmark
+
+此功能非常适合**课程实验报告**的需求。它会用服务器中现有的所有对象模拟 N 次随机 GET 访问，分别运行在三种算法的独立缓存实例上，输出排名：
+
+```bash
+# 运行 200 次迭代的对比测试
+./target/release/minios cache-benchmark --iterations 200
+```
+
+输出示例：
+```
+  Rank    Algorithm    Hits         Misses       Hit Rate
+  ------+------------+------------+------------+----------
+  🥇 1st  LFU          187          13           93.50%
+  🥈 2nd  LRU          171          29           85.50%
+  🥉 3rd  FIFO         142          58           71.00%
+
+  Best algorithm: LFU (93.50% hit rate)
+```
+
+**使用方法**：先上传一系列具有不同访问模式的对象（一些大文件 + 一些频繁访问的小文件），然后运行 benchmark 观察哪种算法最适合当前 workload。
+
+---
+
+## Prometheus 监控与 Dashboard
+
+### 启动监控
+
+```bash
+./target/release/minios --server --metrics-port 9090
+```
+
+### 端点列表
+
+| 端点 | 格式 | 说明 |
+|------|------|------|
+| `http://<IP>:9090/metrics` | Prometheus text | 供 Prometheus/Grafana 采集 |
+| `http://<IP>:9090/` | HTML | 自动刷新的可视化仪表盘 |
+
+### Prometheus 配置
+
+在 `prometheus.yml` 中添加：
+
+```yaml
+scrape_configs:
+  - job_name: 'minios'
+    static_configs:
+      - targets: ['<VM_IP>:9090']
+```
+
+### 暴露的指标
+
+| 指标名 | 类型 | 说明 |
+|--------|------|------|
+| `minios_uptime_seconds` | gauge | 运行时间 |
+| `minios_objects_total` | gauge | 对象总数 |
+| `minios_storage_blocks_total` | gauge | 总块数 |
+| `minios_storage_blocks_used` | gauge | 已用块数 |
+| `minios_storage_blocks_free` | gauge | 空闲块数 |
+| `minios_storage_bytes_total` | gauge | 总容量 |
+| `minios_storage_bytes_used` | gauge | 已用容量 |
+| `minios_cache_hits_total` | counter | 缓存命中数 |
+| `minios_cache_misses_total` | counter | 缓存未命中数 |
+| `minios_cache_evictions_total` | counter | 淘汰次数 |
+| `minios_cache_size` | gauge | 当前缓存条目数 |
+| `minios_cache_capacity` | gauge | 缓存最大容量 |
+| `minios_cache_hit_rate_percent` | gauge | 缓存命中率 |
+| `minios_cache_algorithm_info{algorithm}` | gauge | 当前算法标签 |
+| `minios_shm_pages_total` | gauge | 共享内存总页数 |
+| `minios_shm_pages_free` | gauge | 共享内存空闲页数 |
+
+### HTML Dashboard
+
+访问 `http://<VM_IP>:9090/` 会看到一个每 5 秒自动刷新的仪表盘，包含：
+- 运行时间
+- 存储容量（带进度条）
+- 缓存详细信息（算法、命中率、淘汰次数）
+- 共享内存使用情况
+
+---
+
+## 命令行参数完整列表
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -165,11 +302,30 @@ cargo build --release
 | `--block-size` | `4096` | 数据块大小（字节） |
 | `--total-blocks` | `25600` | 数据块总数（~100MB） |
 | `--max-objects` | `10000` | 最大对象数 |
-| `--cache-capacity` | `128` | LRU 缓存容量 |
-| `--cache-warmup` | `0` | 预热加载对象数 |
+| `--cache-algorithm` | `lru` | 缓存算法：`lru` / `fifo` / `lfu` |
+| `--cache-capacity` | `128` | 缓存容量（对象数） |
+| `--cache-warmup` | `0` | 预热加载 N 个对象 |
+| `--metrics-port` | `9090` | Prometheus 端口（0=禁用） |
 | `--log-level` | `info` | 日志级别 |
 | `--daemonize` | - | 以守护进程方式运行 |
 | `--pid-file` | `/tmp/minios.pid` | PID 文件路径 |
+
+## 客户端子命令
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `put` | 上传对象 | `minios put -n "x" -f ./x.txt -t text/plain --tags '{}'` |
+| `get` | 下载对象 | `minios get -k "x" -o ./out.txt` |
+| `delete` | 删除对象 | `minios delete -k "x"` |
+| `list` | 列出对象 | `minios list [-l]` |
+| `status` | 服务器状态 | `minios status` |
+| `cache-resize` | 动态缩放缓存 | `minios cache-resize -n 256` |
+| `cache-switch` | 切换缓存算法 | `minios cache-switch -a fifo` |
+| `cache-benchmark` | 对比缓存算法 | `minios cache-benchmark -n 200` |
+| `start` | 启动服务器 | `minios start [--daemon]` |
+| `stop` | 停止服务器 | `minios stop` |
+
+---
 
 ## 项目结构
 
@@ -177,6 +333,8 @@ cargo build --release
 minios/
 ├── Cargo.toml          # 项目配置与依赖
 ├── README.md           # 项目文档
+├── TEST_GUIDE.txt      # 手动测试指南
+├── test.sh             # 自动化测试脚本
 └── src/
     ├── main.rs         # 入口点（服务器/客户端模式分发）
     ├── error.rs        # 统一错误类型
@@ -186,22 +344,27 @@ minios/
     │                   #   - MetadataEntry 元数据条目
     │                   #   - ObjectStorage 对象存储 CRUD
     ├── shm.rs          # 共享内存管理器
-    │                   #   - ShmHeader 头部结构
-    │                   #   - SharedMemory 页式分配
-    ├── cache.rs        # LRU 缓存
-    │                   #   - ObjectCache 线程安全缓存
-    │                   #   - CacheStats 命中率统计
+    │                   #   - Header + Page Bitmap + Data Pages
+    ├── cache.rs        # 多算法缓存
+    │                   #   - ObjectCache (LRU/FIFO/LFU)
+    │                   #   - CacheStats + AlgorithmBenchmark
+    │                   #   - 动态扩容/缩容
     ├── ipc.rs          # IPC 通信协议
     │                   #   - ClientMessage/ServerMessage
     │                   #   - IpcServer/IpcClient
     ├── server.rs       # 服务器守护进程
     │                   #   - 请求路由与处理
     │                   #   - PID 文件管理
-    └── client.rs       # CLI 客户端
-                        #   - 所有客户端命令实现
+    ├── client.rs       # CLI 客户端
+    │                   #   - 所有客户端命令实现
+    └── metrics.rs      # Prometheus 监控 + Web Dashboard
+                        #   - /metrics (Prometheus 文本格式)
+                        #   - /        (HTML 仪表盘)
 ```
 
 ## 扩展说明
 
 1. **多线程处理**：每个客户端连接分配独立线程，支持多生产者-多消费者模型
 2. **日志系统**：基于 env_logger，支持多级别日志输出（trace/debug/info/warn/error）
+3. **多缓存算法**：支持 LRU / FIFO / LFU 三种淘汰策略，可运行时缩放和对比
+4. **Prometheus 监控**：零依赖 TCP 服务器，暴露标准 `/metrics` 端点和 HTML 仪表盘

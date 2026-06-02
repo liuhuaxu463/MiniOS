@@ -13,7 +13,9 @@
   6. 数据持久性验证
   7. 边界和异常测试
   8. 服务器启停控制测试
-  9. 测试总结
+  9. 多缓存算法测试
+  10. Prometheus 监控与 Web Dashboard 测试
+  11. 测试总结
 
 ================================================================================
   1. 环境准备
@@ -483,8 +485,187 @@
   [ ] Shared Memory pages 显示正常
 
 ================================================================================
-  9. 测试总结
+  9. 多缓存算法测试
 ================================================================================
+
+----------------------------------------------------------------------
+  9.1 启动服务器时选择不同算法
+----------------------------------------------------------------------
+
+# 分别用三种算法启动服务器，观察 status 中的算法显示
+
+$ ./target/release/minios --server \
+    --cache-algorithm lfu --cache-capacity 64 \
+    --socket-path /tmp/minios_test.sock \
+    --store-path ./test_store.odb --log-level warn &
+
+$ ./target/release/minios --socket-path /tmp/minios_test.sock status | grep Algorithm
+预期输出: Algorithm:        LFU
+
+$ ./target/release/minios --socket-path /tmp/minios_test.sock stop
+
+# 重复测试 FIFO、LRU
+# --cache-algorithm fifo   → 预期: Algorithm: FIFO
+# --cache-algorithm lru    → 预期: Algorithm: LRU
+
+----------------------------------------------------------------------
+  9.2 运行时动态缩放缓存
+----------------------------------------------------------------------
+
+命令:
+  $ ./target/release/minios --socket-path /tmp/minios_test.sock cache-resize --capacity 32
+
+预期输出:
+  ✓ Cache resized from 64 to 32
+
+验证:
+  $ ./target/release/minios --socket-path /tmp/minios_test.sock status | grep "Cache"
+  预期: Entries:  ≤ 32 / 32
+
+命令 (扩容):
+  $ ./target/release/minios --socket-path /tmp/minios_test.sock cache-resize --capacity 512
+
+预期输出:
+  ✓ Cache resized from 32 to 512
+
+----------------------------------------------------------------------
+  9.3 缓存算法对比 Benchmark
+----------------------------------------------------------------------
+
+前置条件: 服务器中有至少 3-5 个对象（可以先上传一些不同大小的文件）
+
+命令:
+  $ ./target/release/minios --socket-path /tmp/minios_test.sock cache-benchmark --iterations 200
+
+预期输出:
+  Workload:  N unique objects, 200 iterations
+
+  Rank    Algorithm    Hits         Misses       Hit Rate
+  ------+------------+------------+------------+----------
+  🥇 1st  LFU          xxx          xxx          xx.xx%
+  🥈 2nd  LRU          xxx          xxx          xx.xx%
+  🥉 3rd  FIFO         xxx          xxx          xx.xx%
+
+  Best algorithm: XXX (xx.xx% hit rate)
+
+说明:
+  - 三种算法使用相同的预加载数据和相同的工作负载
+  - 排名根据命中率从高到低排列
+  - 如果没有上传任何对象，benchmark 会返回 "No objects stored" 错误
+  - 此结果可用于课程报告中分析"不同 workload 下哪种算法最优"
+
+----------------------------------------------------------------------
+  9.4 算法切换提示
+----------------------------------------------------------------------
+
+命令:
+  $ ./target/release/minios --socket-path /tmp/minios_test.sock cache-switch --algorithm fifo
+
+预期输出:
+  ✓ Algorithm switch from LFU to FIFO requires server restart.
+     Current algorithm remains LFU. Restart the server with:
+     --cache-algorithm fifo
+
+说明: 算法切换需要重启服务器（进程级配置），命令会给出明确的重启指引
+
+================================================================================
+  10. Prometheus 监控与 Web Dashboard 测试
+================================================================================
+
+----------------------------------------------------------------------
+  10.1 启动带监控的服务器
+----------------------------------------------------------------------
+
+命令:
+  $ ./target/release/minios --server \
+      --metrics-port 9090 \
+      --socket-path /tmp/minios_test.sock \
+      --store-path ./test_store.odb \
+      --log-level warn &
+
+验证:
+  $ curl -s http://localhost:9090/ | head -5
+  预期: 返回 HTML 内容 "<!DOCTYPE html>"
+
+----------------------------------------------------------------------
+  10.2 /metrics 端点（Prometheus 格式）
+----------------------------------------------------------------------
+
+命令:
+  $ curl -s http://localhost:9090/metrics
+
+预期输出（部分）:
+  # HELP minios_uptime_seconds Server uptime in seconds
+  # TYPE minios_uptime_seconds gauge
+  minios_uptime_seconds <数字>
+
+  # HELP minios_objects_total Total stored objects
+  # TYPE minios_objects_total gauge
+  minios_objects_total <数字>
+
+  # HELP minios_storage_blocks_used Used data blocks
+  # TYPE minios_storage_blocks_used gauge
+  minios_storage_blocks_used <数字>
+
+  # HELP minios_cache_hits_total Total cache hits
+  # TYPE minios_cache_hits_total counter
+  minios_cache_hits_total <数字>
+
+  # HELP minios_cache_hit_rate_percent Cache hit rate percentage
+  # TYPE minios_cache_hit_rate_percent gauge
+  minios_cache_hit_rate_percent <数字>
+
+  # HELP minios_cache_algorithm_info Cache algorithm in use
+  # TYPE minios_cache_algorithm_info gauge
+  minios_cache_algorithm_info{algorithm="LRU"} 1
+
+  # HELP minios_shm_pages_free Free shared memory pages
+  # TYPE minios_shm_pages_free gauge
+  minios_shm_pages_free <数字>
+
+验证清单:
+  [ ] minios_uptime_seconds       存在且值 > 0
+  [ ] minios_objects_total        存在
+  [ ] minios_storage_blocks_used  存在
+  [ ] minios_cache_hits_total     存在
+  [ ] minios_cache_hit_rate_percent 存在
+  [ ] minios_cache_algorithm_info 存在且带 algorithm 标签
+  [ ] minios_shm_pages_free       存在
+
+----------------------------------------------------------------------
+  10.3 HTML Dashboard
+----------------------------------------------------------------------
+
+命令:
+  $ curl -s http://localhost:9090/
+
+预期: 返回 HTML，包含以下元素:
+  - <title>MiniOS Dashboard</title>
+  - <meta http-equiv="refresh" content="5">     (自动刷新)
+  - "📊 Overview"                                (运行时间 + 对象数)
+  - "💾 Storage"                                 (容量 + 进度条)
+  - "🗄️ Cache"                                   (算法/命中率/淘汰)
+  - "🧠 Shared Memory"                           (页使用情况)
+  - 底部有 "/metrics" 链接
+
+浏览器测试:
+  1. 打开浏览器访问 http://<虚拟机IP>:9090/
+  2. 页面应每 5 秒自动刷新
+  3. 上传/下载文件后刷新页面，数据应同步更新
+
+----------------------------------------------------------------------
+  10.4 禁用监控
+----------------------------------------------------------------------
+
+命令:
+  $ ./target/release/minios --server --metrics-port 0 ...
+
+验证:
+  $ curl http://localhost:9090/metrics
+  预期: Connection refused (端口未开启)
+
+================================================================================
+  11. 测试总结
 
 测试覆盖项目:
 
@@ -525,6 +706,14 @@
   ────────────────────────────────────────────────────────────────
   缓存                GET 命中率统计                          [ ]
   缓存                多次 GET 命中率上升                     [ ]
+  缓存                cache-resize 动态缩放                    [ ]
+  缓存                cache-benchmark 算法对比                 [ ]
+  缓存                cache-switch 算法切换提示               [ ]
+  ────────────────────────────────────────────────────────────────
+  Prometheus          /metrics 端点正常响应                    [ ]
+  Prometheus          所有关键指标均有导出                      [ ]
+  Prometheus          HTML Dashboard 正常渲染                  [ ]
+  Prometheus          --metrics-port 0 禁用监控               [ ]
   ────────────────────────────────────────────────────────────────
   持久化              store.odb 文件生成                      [ ]
   持久化              重启后数据完整保留                       [ ]
