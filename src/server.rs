@@ -423,40 +423,31 @@ fn handle_get(
 ) -> Result<()> {
     debug!("GET '{}'", key);
 
-    // Try cache first by key-as-uuid, then fall back to storage
-    let (obj_info, data) = if let Some(cached) = cache.get(key) {
-        debug!("Cache hit for '{}'", key);
-        // Look up metadata from storage to get full info
-        match storage.lock().unwrap().get(key) {
-            Ok((info, _)) => (info, cached.data),
-            Err(e) => {
-                let _ = ipc::send_response(
-                    stream,
-                    &ServerMessage::Error {
-                        code: "NOT_FOUND".to_string(),
-                        message: format!("{}", e),
-                    },
-                );
-                return Ok(());
-            }
+    // Step 1: Resolve key to metadata (UUID + size etc.) without reading data.
+    // `find_info` supports lookup by both UUID and name.
+    let info = match storage.lock().unwrap().find_info(key) {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = ipc::send_response(
+                stream,
+                &ServerMessage::Error {
+                    code: "NOT_FOUND".to_string(),
+                    message: format!("{}", e),
+                },
+            );
+            return Ok(());
         }
+    };
+
+    // Step 2: Use the resolved UUID to check the cache.
+    let data: Vec<u8> = if let Some(cached) = cache.get(&info.uuid) {
+        debug!("Cache HIT for uuid={}, key='{}'", info.uuid, key);
+        cached.data
     } else {
-        debug!("Cache miss for '{}', reading from storage", key);
-        // Read from storage
-        match storage.lock().unwrap().get(key) {
-            Ok((info, data)) => {
-                // Update cache
-                let cached = CachedObject {
-                    uuid: info.uuid.clone(),
-                    data: data.clone(),
-                    name: info.name.clone(),
-                    content_type: info.content_type.clone(),
-                    size: info.size,
-                    tags: info.tags.clone(),
-                };
-                cache.put(&info.uuid, cached);
-                (info, data)
-            }
+        debug!("Cache MISS for uuid={}, key='{}', reading from storage", info.uuid, key);
+        // Read full data from storage
+        let (_info, storage_data) = match storage.lock().unwrap().get(key) {
+            Ok(v) => v,
             Err(e) => {
                 let _ = ipc::send_response(
                     stream,
@@ -467,7 +458,18 @@ fn handle_get(
                 );
                 return Ok(());
             }
-        }
+        };
+        // Update cache by UUID so subsequent GETs hit
+        let cached = CachedObject {
+            uuid: info.uuid.clone(),
+            data: storage_data.clone(),
+            name: info.name.clone(),
+            content_type: info.content_type.clone(),
+            size: info.size,
+            tags: info.tags.clone(),
+        };
+        cache.put(&info.uuid, cached);
+        storage_data
     };
 
     // Allocate shared memory pages for the data
@@ -497,23 +499,23 @@ fn handle_get(
 
     // Send DataReady to client with object metadata
     let response = ServerMessage::DataReady {
-        uuid: obj_info.uuid.clone(),
+        uuid: info.uuid.clone(),
         start_page,
         page_count: pages_needed,
         page_size: shm.page_size(),
-        data_size: obj_info.size,
+        data_size: info.size,
     };
     ipc::send_response(stream, &response)?;
 
     // Also send the object info
     let info_msg = ServerMessage::ObjectInfo {
-        uuid: obj_info.uuid.clone(),
-        name: obj_info.name.clone(),
-        size: obj_info.size,
-        content_type: obj_info.content_type.clone(),
-        created_at: obj_info.created_at.clone(),
-        tags: obj_info.tags.clone(),
-        block_count: obj_info.block_count,
+        uuid: info.uuid.clone(),
+        name: info.name.clone(),
+        size: info.size,
+        content_type: info.content_type.clone(),
+        created_at: info.created_at.clone(),
+        tags: info.tags.clone(),
+        block_count: info.block_count,
     };
     ipc::send_response(stream, &info_msg)?;
 

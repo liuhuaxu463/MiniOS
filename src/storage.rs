@@ -694,6 +694,19 @@ impl ObjectStorage {
         Ok(info)
     }
 
+    /// Find object metadata by UUID or name WITHOUT reading data blocks.
+    /// Returns ObjectInfo only; use `get()` to also read the data.
+    pub fn find_info(&mut self, key: &str) -> Result<ObjectInfo> {
+        let entry = self
+            .find_entry(key)?
+            .ok_or_else(|| MiniOsError::NotFound(format!("Object not found: {}", key)))?;
+
+        if entry.flags & META_FLAG_DELETED != 0 {
+            return Err(MiniOsError::NotFound(format!("Object not found: {}", key)));
+        }
+        Ok(entry.to_object_info())
+    }
+
     /// Get an object from the store by UUID or name
     /// Returns (ObjectInfo, data_bytes)
     pub fn get(&mut self, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
