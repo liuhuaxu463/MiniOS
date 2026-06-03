@@ -1,7 +1,7 @@
 use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType};
 use crate::shm::SharedMemory;
 use crate::storage::SharedStorage;
-use log::{error, info};
+use log::{debug, error, info};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,7 +136,7 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
         ("POST", "/api/put") =>
             handle_web_put(&mut stream, &headers, &body, &ct_lower, storage, cache),
         ("GET", "/api/get") =>
-            handle_web_get(&mut stream, &raw_req, storage),
+            handle_web_get(&mut stream, &raw_req, storage, cache),
         ("GET", "/api/delete") =>
             handle_web_delete(&mut stream, &raw_req, storage, cache),
         ("POST", "/api/resize") =>
@@ -344,24 +344,50 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &str, ct: &str,
     }
 }
 
-fn handle_web_get(stream: &mut TcpStream, req: &str, storage: &SharedStorage) {
+fn handle_web_get(stream: &mut TcpStream, req: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     if let Some(key) = get_query_param(req, "key") {
-        let mut st = storage.lock().unwrap();
-        match st.get(&key) {
-            Ok((info, data)) => {
-                let hdr = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
-                    Content-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\n\
-                    Connection: close\r\n\r\n", info.content_type, info.name, data.len());
-                let _ = stream.write_all(hdr.as_bytes());
-                let _ = stream.write_all(&data);
-                return;
-            }
+        // Step 1: resolve key to UUID (find_info reads only metadata, no data blocks)
+        let info = match storage.lock().unwrap().find_info(&key) {
+            Ok(info) => info,
             Err(e) => {
                 respond_ok(stream, "text/html; charset=utf-8", &page("未找到",
                     &format!("<p class='error'>对象未找到：{}</p><a class='btn-back' href='/api/get'>返回</a>", e)));
                 return;
             }
-        }
+        };
+
+        // Step 2: check cache by UUID first (same logic as CLI handle_get)
+        let data = if let Some(cached) = cache.get(&info.uuid) {
+            debug!("Web GET cache HIT for uuid={}", info.uuid);
+            cached.data
+        } else {
+            debug!("Web GET cache MISS, reading from disk");
+            let mut st = storage.lock().unwrap();
+            match st.get(&key) {
+                Ok((_info, storage_data)) => {
+                    // Update cache by UUID so subsequent GETs hit
+                    cache.put(&info.uuid, CachedObject {
+                        uuid: info.uuid.clone(), data: storage_data.clone(),
+                        name: info.name.clone(), content_type: info.content_type.clone(),
+                        size: info.size, tags: info.tags.clone(),
+                    });
+                    storage_data
+                }
+                Err(e) => {
+                    respond_ok(stream, "text/html; charset=utf-8", &page("未找到",
+                        &format!("<p class='error'>{}<a class='btn-back' href='/api/get'>返回</a>", e)));
+                    return;
+                }
+            }
+        };
+
+        // Send as download
+        let hdr = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
+            Content-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\n\
+            Connection: close\r\n\r\n", info.content_type, info.name, data.len());
+        let _ = stream.write_all(hdr.as_bytes());
+        let _ = stream.write_all(&data);
+        return;
     }
 
     // No key — list objects
@@ -467,13 +493,14 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
 
     // Use configured cache capacity, capped at number of objects
     let real_cap = cache.capacity();
-    let cap = real_cap.min(n).max(1);
+    let cap = real_cap.max(1);
 
-    // Preload benchmark caches with actual storage data so cache hits can occur
+    // Preload benchmark caches with actual storage data from disk
+    let preload_count = cap.min(n).min(50);
     let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
     {
         let mut st = storage.lock().unwrap();
-        for uuid in object_uuids.iter().take(cap.min(50)) {
+        for uuid in object_uuids.iter().take(preload_count) {
             if let Ok((_info, data)) = st.get(uuid) {
                 preloaded.push((uuid.clone(), CachedObject {
                     uuid: uuid.clone(), data, name: "bench".to_string(),
@@ -482,6 +509,9 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
             }
         }
     }
+
+    // Show first few workload keys for diagnostics
+    let first_keys: Vec<&str> = workload.iter().take(10).map(|s| &s[..s.len().min(8)]).collect();
 
     let mut rows = String::new();
     let mut best = ("", 0.0);
@@ -497,9 +527,12 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
         &format!("<h2>缓存算法对比</h2>
         <table><tr><th>算法</th><th>命中</th><th>未命中</th><th>命中率</th></tr>{}</table>
         <p style='margin-top:1em'><strong>最优算法：{}</strong>（{:.2}% 命中率）</p>
-        <p style='color:#8590a6'>测试条件：{} 个对象，{} 次迭代，缓存容量 {}（预加载 {} 条）</p>
+        <p style='color:#8590a6;font-size:.85em'>
+        测试条件：{} 个对象，{} 次迭代，缓存容量 {}，预加载 {} 条<br>
+        首 10 个访问键：{}...
+        </p>
         <a class='btn-back' href='/manage'>返回</a>",
-        rows, best.0, best.1, n, iterations, cap, preloaded.len())));
+        rows, best.0, best.1, n, iterations, cap, preloaded.len(), first_keys.join(", "))));
 }
 
 // ============================================================================
