@@ -56,7 +56,9 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
     let n = match stream.read(&mut buf) { Ok(n) if n > 0 => n, _ => return, };
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or("");
-    let (method, path) = parse_first(first_line);
+    let (method, raw_path) = parse_first(first_line);
+    // Strip query string for routing, but keep original request for param parsing
+    let path = raw_path.split('?').next().unwrap_or(raw_path);
     let body_start = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(req.len());
     let body = &req[body_start..];
 
@@ -195,8 +197,8 @@ fn handle_web_get(stream: &mut TcpStream, req: &str, storage: &SharedStorage) {
                 format!("<p>点击文件名即可下载：</p>\
                     <table><tr><th>名称</th><th>UUID</th><th>大小</th><th>创建时间</th></tr>{}</table>", rows)
             };
-            respond(stream, "200 OK", "text/html", &page("下载对象",
-                &format!("{}<a class='btn-back' href='/manage'>← 返回</a>", h)));
+            respond(stream, "200 OK", "text/html", &page_tab("下载对象",
+                &format!("{}<a class='btn-back' href='/manage'>← 返回</a>", h), "download"));
             return;
         }
     };
@@ -235,9 +237,9 @@ fn handle_web_delete(stream: &mut TcpStream, req: &str, storage: &SharedStorage,
                         o.name, o.uuid, o.size, o.uuid, o.name));
                 }
             }
-            respond(stream, "200 OK", "text/html", &page("删除对象",
+            respond(stream, "200 OK", "text/html", &page_tab("删除对象",
                 &format!("<table><tr><th>名称</th><th>UUID</th><th>大小</th><th>操作</th></tr>{}</table>\
-                    <a class='btn-back' href='/manage'>← 返回</a>", rows)));
+                    <a class='btn-back' href='/manage'>← 返回</a>", rows), "delete"));
             return;
         }
     };
@@ -318,11 +320,23 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
 // ============================================================================
 
 fn page(title: &str, body: &str) -> String {
-    page_with_refresh(title, body, false)
+    page_with_refresh(title, body, false, "")
 }
 
-fn page_with_refresh(title: &str, body: &str, auto_refresh: bool) -> String {
+/// Same as page() but with an active navigation tab highlighted.
+fn page_tab(title: &str, body: &str, active_tab: &str) -> String {
+    page_with_refresh(title, body, false, active_tab)
+}
+
+fn page_with_refresh(title: &str, body: &str, auto_refresh: bool, active_tab: &str) -> String {
     let refresh_tag = if auto_refresh { "<meta http-equiv=\"refresh\" content=\"5\">" } else { "" };
+    let (a0, a1, a2, a3) = match active_tab {
+        "overview" => (" class='active'", "", "", ""),
+        "manage"   => ("", " class='active'", "", ""),
+        "download" => ("", "", " class='active'", ""),
+        "delete"   => ("", "", "", " class='active'"),
+        _          => ("", "", "", ""),
+    };
     format!(r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -441,10 +455,10 @@ textarea {{ resize: vertical; min-height: 120px; }}
   <div class="header-inner">
     <a class="logo" href="/">Mini<span>OS</span></a>
     <div class="nav">
-      <a href="/" {}>总览</a>
-      <a href="/manage" {}>管理</a>
-      <a href="/api/get">下载</a>
-      <a href="/api/delete">删除</a>
+      <a href="/"{}>总览</a>
+      <a href="/manage"{}>管理</a>
+      <a href="/api/get"{}>下载</a>
+      <a href="/api/delete"{}>删除</a>
       <a href="/metrics">监控</a>
     </div>
   </div>
@@ -465,8 +479,7 @@ textarea {{ resize: vertical; min-height: 120px; }}
 </html>"##,
     refresh_tag,
     title,
-    if title.contains("总览") {{ "class='active'" }} else {{ "" }},
-    if title.contains("管理") || title.contains("上传") || title.contains("下载") || title.contains("删除") || title.contains("性能") || title.contains("缓存") {{ "class='active'" }} else {{ "" }},
+    a0, a1, a2, a3,
     title, body, env!("CARGO_PKG_VERSION"))
 }
 
@@ -494,7 +507,7 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
     let cap = cache.capacity();
     let cs = cache.stats();
 
-    page("对象管理", &format!(
+    page_tab("对象管理", &format!(
         r##"<div class="stats-grid">
 <div class="stat-item"><div class="stat-value">{}</div><div class="stat-label">已存对象</div></div>
 <div class="stat-item"><div class="stat-value">{:.1}%</div><div class="stat-label">容量使用率</div></div>
@@ -535,7 +548,7 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
         cap, cap.max(2),
         status.object_count, table,
         status.used_blocks, status.total_blocks, fmt_bytes(status.block_size as u64),
-    ))
+    ), "manage")
 }
 
 fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<SharedMemory>, start_time: Instant) -> String {
@@ -586,7 +599,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
         cs.algorithm, cs.size, cs.capacity, cs.hits, cs.misses,
         cs.evictions, cs.hit_rate(),
         shm.free_page_count(), shm.num_pages(),
-    ), true)
+    ), true, "overview")
 }
 
 // ============================================================================
