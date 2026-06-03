@@ -49,28 +49,43 @@ impl MetricsServer {
 
 fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
-    let mut buf = [0u8; 65536];
+    stream.set_nonblocking(false).ok();
+    let mut buf = vec![0u8; 65536];
     let mut total = 0;
-    // Read in a loop until we have headers + body, or timeout
+
+    // Phase 1: read headers until \r\n\r\n
     loop {
-        match stream.read(&mut buf[total..]) {
-            Ok(n) if n > 0 => { total += n; if total >= 65536 { break; } }
-            Ok(_) => break,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(_) => break,
+        if total >= buf.len() { buf.resize(buf.len() * 2, 0); }
+        match stream_read(stream, &mut buf[total..total+1]) {
+            Some(n) if n > 0 => { total += n; }
+            _ => break,
         }
-        if total > 0 {
-            let hdr = String::from_utf8_lossy(&buf[..total.min(65536)]);
-            if let Some(hdr_end) = hdr.find("\r\n\r\n") {
-                let hdr_part = hdr[..hdr_end].to_string();
-                let body_start = hdr_end + 4;
-                let body = hdr[body_start..].to_string();
-                return Some((hdr_part, body, hdr.to_string()));
+        if total >= 4 {
+            let peek = String::from_utf8_lossy(&buf[..total]);
+            if let Some(hdr_end) = peek.find("\r\n\r\n") {
+                let hdr_str = peek[..hdr_end].to_string();
+                let body_offset = hdr_end + 4;
+
+                // Phase 2: read full body based on Content-Length
+                let body_len: usize = hdr_str.lines()
+                    .find(|l| l.to_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+
+                let needed = body_offset + body_len;
+                while total < needed {
+                    if total >= buf.len() { buf.resize(buf.len() * 2, 0); }
+                    match stream_read(stream, &mut buf[total..total+1]) {
+                        Some(n) if n > 0 => { total += n; }
+                        _ => break,
+                    }
+                }
+
+                let body = String::from_utf8_lossy(&buf[body_offset..total]).to_string();
+                return Some((hdr_str, body, String::from_utf8_lossy(&buf[..total]).to_string()));
             }
         }
-        // Check if we might need more data
-        if total >= buf.len() { break; }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     if total == 0 { return None; }
     let raw = String::from_utf8_lossy(&buf[..total]);
@@ -78,6 +93,18 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
     let headers = raw[..hdr_end.saturating_sub(4)].to_string();
     let body = raw[hdr_end..].to_string();
     Some((headers, body, raw.to_string()))
+}
+
+fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
+    match stream.read(buf) {
+        Ok(n) if n > 0 => Some(n),
+        Ok(_) => None,
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            match stream.read(buf) { Ok(n) if n > 0 => Some(n), _ => None }
+        }
+        Err(_) => None,
+    }
 }
 
 fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>,
