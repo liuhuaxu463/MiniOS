@@ -422,7 +422,20 @@ impl ObjectCache {
         }
 
         for key in keys {
-            self.get(key);
+            if self.get(key).is_none() {
+                // Cache miss — insert a lightweight placeholder so this
+                // object competes for cache space. Without this, the cache
+                // stays empty forever and every access is a 0% miss.
+                // Real data isn't needed; we only measure hit/miss patterns.
+                self.put(key, CachedObject {
+                    uuid: key.clone(),
+                    data: vec![],
+                    name: String::new(),
+                    content_type: String::new(),
+                    size: 0,
+                    tags: String::new(),
+                });
+            }
         }
 
         let stats = self.stats();
