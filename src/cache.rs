@@ -423,6 +423,32 @@ impl ObjectCache {
     }
 }
 
+/// Generate a benchmark workload with Zipf-like weighted distribution.
+///
+/// Object at index 0 gets ~50% of the accesses, index 1 gets ~25%,
+/// index 2 gets ~12.5%, etc. This simulates real-world hot/cold data
+/// patterns where a few objects are very popular.
+pub fn generate_weighted_workload(objects: &[String], iterations: usize) -> Vec<String> {
+    let n = objects.len();
+    if n == 0 { return vec![]; }
+    // Weights: obj[i] weight = 1/(i+1), normalized, creating ~50/25/12.5% split
+    let weights: Vec<f64> = (0..n).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+    let total: f64 = weights.iter().sum();
+    let cum: Vec<f64> = weights.iter()
+        .scan(0.0, |acc, w| { *acc += w; Some(*acc / total) })
+        .collect();
+    let mut seed = iterations as u64 * n as u64 + 12345;
+    let mut workload = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let r = (seed >> 32) as f64 / (u32::MAX as f64);
+        for (j, &c) in cum.iter().enumerate() {
+            if r <= c { workload.push(objects[j].clone()); break; }
+        }
+    }
+    workload
+}
+
 /// Helper to convert bytes to a human-readable size string
 pub fn human_readable_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];

@@ -1,4 +1,4 @@
-use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType};
+use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType, generate_weighted_workload};
 use crate::config::CliArgs;
 use crate::error::{MiniOsError, Result};
 use crate::ipc::{self, ClientMessage, IpcServer, ServerMessage};
@@ -821,11 +821,8 @@ fn handle_cache_benchmark(
         }
     }
 
-    // Build workload keys: cycle through UUIDs for `iterations` rounds
     let n = object_uuids.len();
-    let workload: Vec<String> = (0..iterations)
-        .map(|i| object_uuids[i % n].clone())
-        .collect();
+    let workload = generate_weighted_workload(&object_uuids, iterations);
 
     let mut results: Vec<ipc::CacheBenchmarkEntry> = Vec::new();
 
@@ -898,7 +895,7 @@ fn handle_cache_sweep(
     }
 
     let n = object_uuids.len();
-    let workload: Vec<String> = (0..iterations).map(|i| object_uuids[i % n].clone()).collect();
+    let workload = generate_weighted_workload(&object_uuids, iterations);
 
     // Preload up to 32 objects for fair comparison
     let max_preload = 32;
