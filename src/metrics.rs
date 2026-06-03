@@ -178,19 +178,10 @@ fn parse_multipart(headers: &str, body: &str) -> Vec<MultipartField> {
     if boundary.is_empty() { return vec![]; }
 
     let full_boundary = format!("--{}", boundary);
-    let end_boundary = format!("--{}--", boundary);
     let body_bytes = body.as_bytes();
     let mut fields = Vec::new();
 
-    let parts: Vec<&[u8]> = body_bytes.split(|&b| b == b'\n')
-        .collect::<Vec<_>>()
-        .windows(2)
-        .filter(|w| {
-            let line = std::str::from_utf8(w[0]).unwrap_or("");
-            line.trim() == full_boundary
-        }).map(|_| ()).collect(); // This won't work easily...
-
-    // Simpler approach: scan byte-by-byte for boundary markers
+    // Scan byte-by-byte for boundary markers
     let mut pos = 0;
     while pos < body_bytes.len() {
         // Find next boundary
