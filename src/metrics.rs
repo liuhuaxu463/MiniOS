@@ -47,13 +47,15 @@ impl MetricsServer {
 // HTTP parsing
 // ============================================================================
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
+/// Read an HTTP request. Returns (headers_as_string, body_as_raw_bytes).
+/// Headers are guaranteed ASCII, body is kept as raw Vec<u8> to preserve
+/// binary data (PNG, JPEG, etc.) without corruption.
+fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
     stream.set_nonblocking(false).ok();
     let mut buf = vec![0u8; 65536];
     let mut total = 0;
 
-    // Phase 1: read headers until \r\n\r\n
     loop {
         if total >= buf.len() { buf.resize(buf.len() * 2, 0); }
         match stream_read(stream, &mut buf[total..total+1]) {
@@ -66,7 +68,6 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
                 let hdr_str = peek[..hdr_end].to_string();
                 let body_offset = hdr_end + 4;
 
-                // Phase 2: read full body based on Content-Length
                 let body_len: usize = hdr_str.lines()
                     .find(|l| l.to_lowercase().starts_with("content-length:"))
                     .and_then(|l| l.split(':').nth(1))
@@ -82,8 +83,9 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
                     }
                 }
 
-                let body = String::from_utf8_lossy(&buf[body_offset..total]).to_string();
-                return Some((hdr_str, body, String::from_utf8_lossy(&buf[..total]).to_string()));
+                // Copy body as raw bytes — NO string conversion
+                let body_bytes = buf[body_offset..total].to_vec();
+                return Some((hdr_str, body_bytes));
             }
         }
     }
@@ -91,8 +93,8 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
     let raw = String::from_utf8_lossy(&buf[..total]);
     let hdr_end = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
     let headers = raw[..hdr_end.saturating_sub(4)].to_string();
-    let body = raw[hdr_end..].to_string();
-    Some((headers, body, raw.to_string()))
+    let body_bytes = buf[hdr_end..total].to_vec();
+    Some((headers, body_bytes))
 }
 
 fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
@@ -109,7 +111,7 @@ fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
 
 fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>,
             shm: &Arc<SharedMemory>, start_time: Instant) {
-    let (headers, body, raw_req) = match read_request(&mut stream) {
+    let (headers, body_bytes) = match read_request(&mut stream) {
         Some(v) => v,
         None => return,
     };
@@ -117,7 +119,6 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
     let (method, raw_path) = parse_first(first_line);
     let path = raw_path.split('?').next().unwrap_or(raw_path);
 
-    // Determine content type
     let ct_lower = headers.lines()
         .find(|l| l.to_lowercase().starts_with("content-type:"))
         .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_lowercase())
@@ -134,13 +135,13 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
             respond_ok(&mut stream, "text/html; charset=utf-8",
                        &build_manage_page(storage, cache)),
         ("POST", "/api/put") =>
-            handle_web_put(&mut stream, &headers, &body, &ct_lower, storage, cache),
+            handle_web_put(&mut stream, &headers, &body_bytes, &ct_lower, storage, cache),
         ("GET", "/api/get") =>
-            handle_web_get(&mut stream, &raw_req, storage, cache),
+            handle_web_get(&mut stream, first_line, storage, cache),
         ("GET", "/api/delete") =>
-            handle_web_delete(&mut stream, &raw_req, storage, cache),
+            handle_web_delete(&mut stream, first_line, storage, cache),
         ("POST", "/api/resize") =>
-            handle_web_resize(&mut stream, &body, cache),
+            handle_web_resize(&mut stream, &body_bytes, cache),
         ("GET", "/api/benchmark") =>
             handle_web_benchmark(&mut stream, storage, cache),
         _ => respond(&mut stream, "404 Not Found", "text/plain", "404\n"),
@@ -196,22 +197,18 @@ fn url_decode(s: &str) -> String {
 
 struct MultipartField { name: String, data: Vec<u8> }
 
-/// Parse multipart/form-data body. Uses string splitting on the boundary
-/// (ASCII-only, safe for UTF-8 body content). Returns fields keyed by name.
-fn parse_multipart(headers: &str, body: &str) -> Vec<MultipartField> {
+/// Parse multipart/form-data body. Takes raw bytes to preserve binary
+/// file contents (PNG, JPEG, etc.) without corruption.
+fn parse_multipart(headers: &str, body: &[u8]) -> Vec<MultipartField> {
     let ct = headers.lines()
         .find(|l| l.to_lowercase().starts_with("content-type:"))
         .unwrap_or("");
     let boundary = ct.split("boundary=").nth(1).map(|b| b.trim().trim_matches('"')).unwrap_or("");
     if boundary.is_empty() { return vec![]; }
 
-    // Multipart body format:
-    //   --boundary\r\n  (first, no leading \r\n)
-    //   \r\n--boundary\r\n  (subsequent)
-    //   \r\n--boundary--  (ends with --)
     let boundary_marker = format!("--{}", boundary);
     let bm = boundary_marker.as_bytes();
-    let body_bytes = body.as_bytes();
+    let body_bytes = body;
     let mut fields = Vec::new();
 
     // Find all boundary positions
@@ -276,8 +273,11 @@ fn parse_field_section(data: &[u8]) -> Option<MultipartField> {
     name.map(|n| MultipartField { name: n.to_string(), data: content.to_vec() })
 }
 
-fn get_form_field_urlencoded(body: &str, field: &str) -> Option<String> {
-    for pair in body.split('&') {
+/// Parse URL-encoded form body from raw bytes. Converts to string only
+/// for parsing the ASCII key=value pairs — field values get URL-decoded.
+fn get_form_field_urlencoded(body: &[u8], field: &str) -> Option<String> {
+    let bstr = String::from_utf8_lossy(body);
+    for pair in bstr.split('&') {
         let mut kv = pair.splitn(2, '=');
         if kv.next() == Some(field) {
             if let Some(v) = kv.next() { if !v.is_empty() { return Some(url_decode(v)); } }
@@ -290,7 +290,7 @@ fn get_form_field_urlencoded(body: &str, field: &str) -> Option<String> {
 // Handlers
 // ============================================================================
 
-fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &str, ct: &str,
+fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
                   storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let (name, content, ctype, tags) = if ct.contains("multipart/form-data") {
         let fields = parse_multipart(headers, body);
@@ -344,8 +344,8 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &str, ct: &str,
     }
 }
 
-fn handle_web_get(stream: &mut TcpStream, req: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
-    if let Some(key) = get_query_param(req, "key") {
+fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
+    if let Some(key) = get_query_param(first_line, "key") {
         // Step 1: resolve key to UUID (find_info reads only metadata, no data blocks)
         let info = match storage.lock().unwrap().find_info(&key) {
             Ok(info) => info,
@@ -411,8 +411,8 @@ fn handle_web_get(stream: &mut TcpStream, req: &str, storage: &SharedStorage, ca
         &page_tab("下载对象", &format!("{}<a class='btn-back' href='/manage'>返回</a>", h), "download"));
 }
 
-fn handle_web_delete(stream: &mut TcpStream, req: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
-    if let Some(key) = get_query_param(req, "key") {
+fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
+    if let Some(key) = get_query_param(first_line, "key") {
         let uuid = {
             let mut st = storage.lock().unwrap();
             match st.find_info(&key) {
@@ -460,7 +460,7 @@ fn handle_web_delete(stream: &mut TcpStream, req: &str, storage: &SharedStorage,
             <a class='btn-back' href='/manage'>返回</a>", rows), "delete"));
 }
 
-fn handle_web_resize(stream: &mut TcpStream, body: &str, cache: &Arc<ObjectCache>) {
+fn handle_web_resize(stream: &mut TcpStream, body: &[u8], cache: &Arc<ObjectCache>) {
     let cap_str = get_form_field_urlencoded(body, "capacity").unwrap_or_default();
     match cap_str.parse::<usize>() {
         Ok(cap) if cap > 0 => {
