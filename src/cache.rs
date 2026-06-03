@@ -267,6 +267,9 @@ pub struct ObjectCache {
     misses: AtomicU64,
     evictions: AtomicU64,
     algorithm: CacheAlgorithmType,
+    /// Track how many times each UUID has been accessed (GET calls).
+    /// Used by benchmark to generate realistic workloads.
+    access_counts: Mutex<HashMap<String, u64>>,
 }
 
 impl ObjectCache {
@@ -282,10 +285,16 @@ impl ObjectCache {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             algorithm,
+            access_counts: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn get(&self, uuid: &str) -> Option<CachedObject> {
+        // Record every access for workload generation
+        {
+            let mut counts = self.access_counts.lock().unwrap();
+            *counts.entry(uuid.to_string()).or_insert(0) += 1;
+        }
         let mut inner = self.inner.lock().unwrap();
         let found = match &mut *inner {
             InnerCache::Lru(c) => c.get(uuid).cloned(),
@@ -389,6 +398,12 @@ impl ObjectCache {
         self.algorithm
     }
 
+    /// Return a copy of the per-UUID access frequency map.
+    /// Keys are UUIDs, values are the number of `get()` calls.
+    pub fn get_access_frequencies(&self) -> HashMap<String, u64> {
+        self.access_counts.lock().unwrap().clone()
+    }
+
     pub fn reset_stats(&self) {
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
@@ -423,17 +438,36 @@ impl ObjectCache {
     }
 }
 
-/// Generate a benchmark workload with Zipf-like weighted distribution.
+/// Generate a benchmark workload driven by real per-UUID access frequencies.
 ///
-/// Object at index 0 gets ~50% of the accesses, index 1 gets ~25%,
-/// index 2 gets ~12.5%, etc. This simulates real-world hot/cold data
-/// patterns where a few objects are very popular.
-pub fn generate_weighted_workload(objects: &[String], iterations: usize) -> Vec<String> {
+/// Each object's weight = (download count + 1). Objects that users actually
+/// downloaded more often appear correspondingly more in the workload.
+/// If no frequencies are available, falls back to uniform distribution.
+pub fn generate_weighted_workload(
+    objects: &[String],
+    iterations: usize,
+    frequencies: &HashMap<String, u64>,
+) -> Vec<String> {
     let n = objects.len();
     if n == 0 { return vec![]; }
-    // Weights: obj[i] weight = 1/(i+1), normalized, creating ~50/25/12.5% split
-    let weights: Vec<f64> = (0..n).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+
+    // Build weights from real download counts (min weight = 1 for never-accessed objects)
+    let weights: Vec<f64> = objects.iter()
+        .map(|uuid| (frequencies.get(uuid).copied().unwrap_or(0) + 1) as f64)
+        .collect();
     let total: f64 = weights.iter().sum();
+    if total == 0.0 {
+        // No data at all — uniform
+        let mut seed = iterations as u64 * n as u64 + 12345;
+        let mut wl = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let idx = ((seed >> 32) as usize) % n;
+            wl.push(objects[idx].clone());
+        }
+        return wl;
+    }
+
     let cum: Vec<f64> = weights.iter()
         .scan(0.0, |acc, w| { *acc += w; Some(*acc / total) })
         .collect();

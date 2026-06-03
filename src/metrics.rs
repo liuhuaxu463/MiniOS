@@ -489,7 +489,8 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
     }
     let n = object_uuids.len();
     let iterations = 200;
-    let workload = generate_weighted_workload(&object_uuids, iterations);
+    let freqs = cache.get_access_frequencies();
+    let workload = generate_weighted_workload(&object_uuids, iterations, &freqs);
     let real_cap = cache.capacity();
     let cap = real_cap.max(1);
 
@@ -508,13 +509,13 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
         }
     }
 
-    // Count frequency of each object in workload for diagnostics
-    let mut freq: Vec<(usize, &str)> = object_uuids.iter().enumerate()
-        .map(|(i, u)| (workload.iter().filter(|k| **k == object_uuids[i]).count(), &u[..u.len().min(8)]))
+    // Show real download counts for each object
+    let mut freq: Vec<(u64, &str)> = object_uuids.iter()
+        .map(|u| (freqs.get(u).copied().unwrap_or(0), &u[..u.len().min(8)]))
         .collect();
     freq.sort_by(|a, b| b.0.cmp(&a.0));
     let freq_str = freq.iter()
-        .map(|(cnt, short)| format!("{}...({} 次)", short, cnt))
+        .map(|(cnt, short)| format!("{}...(下载 {} 次)", short, cnt))
         .collect::<Vec<_>>().join(", ");
 
     let mut rows = String::new();
@@ -533,8 +534,8 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
         <p style='margin-top:1em'><strong>最优算法：{}</strong>（{:.2}% 命中率）</p>
         <p style='color:#8590a6;font-size:.85em'>
         测试条件：{} 个对象，{} 次迭代，缓存容量 {}，预加载 {} 条<br>
-        访问分布（Zipf 加权）：{}<br>
-        说明：排在前面的对象被访问次数远多于后面的，模拟热/冷数据分布
+        下载记录：{}<br>
+        说明：权重 = 实际下载次数 + 1，你越常下载的文件在测试中被访问的次数就越多
         </p>
         <a class='btn-back' href='/manage'>返回</a>",
         rows, best.0, best.1, n, iterations, cap, preloaded.len(), freq_str)));

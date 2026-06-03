@@ -822,7 +822,8 @@ fn handle_cache_benchmark(
     }
 
     let n = object_uuids.len();
-    let workload = generate_weighted_workload(&object_uuids, iterations);
+    let freqs = cache.get_access_frequencies();
+    let workload = generate_weighted_workload(&object_uuids, iterations, &freqs);
 
     let mut results: Vec<ipc::CacheBenchmarkEntry> = Vec::new();
 
@@ -895,7 +896,8 @@ fn handle_cache_sweep(
     }
 
     let n = object_uuids.len();
-    let workload = generate_weighted_workload(&object_uuids, iterations);
+    let freqs = cache.get_access_frequencies();
+    let workload = generate_weighted_workload(&object_uuids, iterations, &freqs);
 
     // Preload up to 32 objects for fair comparison
     let max_preload = 32;
