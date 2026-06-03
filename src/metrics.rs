@@ -510,7 +510,7 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
 
     // Count frequency of each object in workload for diagnostics
     let mut freq: Vec<(usize, &str)> = object_uuids.iter().enumerate()
-        .map(|(i, u)| (workload.iter().filter(|k| *k == object_uuids[i]).count(), &u[..u.len().min(8)]))
+        .map(|(i, u)| (workload.iter().filter(|k| **k == object_uuids[i]).count(), &u[..u.len().min(8)]))
         .collect();
     freq.sort_by(|a, b| b.0.cmp(&a.0));
     let freq_str = freq.iter()
