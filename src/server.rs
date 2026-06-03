@@ -579,13 +579,6 @@ fn handle_get(
     }
     // Log after successful get
     access_log.record("GET", &info.name, &info.uuid, info.size, &info.content_type, &info.tags);
-        ClientMessage::DataError { uuid: _, error: _ } => {
-            shm.free_pages(start_page, pages_needed)?;
-        }
-        _ => {
-            shm.free_pages(start_page, pages_needed)?;
-        }
-    }
 
     Ok(())
 }
