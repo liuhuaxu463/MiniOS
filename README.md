@@ -368,3 +368,241 @@ minios/
 2. **日志系统**：基于 env_logger，支持多级别日志输出（trace/debug/info/warn/error）
 3. **多缓存算法**：支持 LRU / FIFO / LFU 三种淘汰策略，可运行时缩放和对比
 4. **Prometheus 监控**：零依赖 TCP 服务器，暴露标准 `/metrics` 端点和 HTML 仪表盘
+
+---
+
+## Prometheus + Grafana 生产级监控部署指南
+
+以下步骤教你如何搭建业界标准的监控可视化平台。MiniOS 代码无需任何修改。
+
+### 架构概览
+
+```
+MiniOS Server (:9090) → /metrics (Prometheus 格式)
+         ↑
+         │ 每 5 秒抓取一次
+         │
+   Prometheus (:9091) → 时序数据库（存储历史数据）
+         ↑
+         │ PromQL 查询
+         │
+   Grafana (:3000) → 可视化 Dashboard（折线图、仪表盘、表格）
+```
+
+### 第一步：确认 MiniOS 监控端点正常
+
+```bash
+# 启动 MiniOS（确保 metrics 端口开启）
+./target/release/minios --server --metrics-port 9090 &
+
+# 验证 /metrics 端点
+curl http://localhost:9090/metrics
+```
+
+预期输出类似：
+```
+minios_uptime_seconds 120
+minios_objects_total 5
+minios_cache_hits_total 42
+minios_cache_hit_rate_percent 78.50
+...
+```
+
+### 第二步：安装 Prometheus
+
+```bash
+# 下载并解压
+cd ~
+wget https://github.com/prometheus/prometheus/releases/download/v3.7.3/prometheus-3.7.3.linux-amd64.tar.gz
+tar xzf prometheus-3.7.3.linux-amd64.tar.gz
+cd prometheus-3.7.3.linux-amd64
+
+# 创建配置文件 prometheus.yml
+cat > prometheus.yml << 'EOF'
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'minios'
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+
+# 启动 Prometheus
+./prometheus --config.file=prometheus.yml --web.listen-address=:9091 &
+```
+
+启动后访问 `http://<虚拟机IP>:9091`，可以看到 Prometheus 自带的 Web UI。
+
+验证数据是否在抓取：
+1. 在 Prometheus Web UI 顶部的搜索框输入 `minios_objects_total`
+2. 点击 Execute
+3. 切换到 Graph 标签 —— 应该能看到数据
+
+### 第三步：安装 Grafana
+
+```bash
+# 安装 Grafana（Ubuntu/Debian）
+sudo apt-get install -y software-properties-common wget
+sudo wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
+echo "deb [signed-by=/usr/share/keyrings/grafana.key] https://apt.grafana.com stable main" \
+    | sudo tee /etc/apt/sources.list.d/grafana.list
+sudo apt-get update
+sudo apt-get install -y grafana
+
+# 启动 Grafana
+sudo systemctl start grafana-server
+sudo systemctl enable grafana-server
+```
+
+初始登录：`http://<虚拟机IP>:3000`，用户名 `admin`，密码 `admin`（首次登录会要求修改）。
+
+### 第四步：配置 Grafana 数据源
+
+1. 登录 Grafana → 左侧菜单 → Connections → Data sources
+2. 点击「Add data source」→ 选择「Prometheus」
+3. URL 填写 `http://localhost:9091`
+4. 点击底部「Save & test」→ 应显示绿色的 "Successfully queried Prometheus API"
+
+### 第五步：创建监控 Dashboard
+
+#### 方法 A：手动创建（5-10 分钟）
+
+在 Grafana 中点击「Dashboards」→「New」→「Add visualization」，逐个添加面板。每个面板的查询语句如下：
+
+| 面板名称 | PromQL 查询 | 图表类型 | Legend |
+|----------|------------|----------|--------|
+| 对象总数 | `minios_objects_total` | Stat | — |
+| 缓存命中率 | `minios_cache_hit_rate_percent` | Gauge | — |
+| 命中/未命中趋势 | `rate(minios_cache_hits_total[5m])` 和 `rate(minios_cache_misses_total[5m])` | Time series | Hits / Misses |
+| 存储使用量 | `minios_storage_bytes_used` 和 `minios_storage_bytes_total` | Time series | Used / Total |
+| 数据块使用 | `minios_storage_blocks_used` | Time series | — |
+| 淘汰速率 | `rate(minios_cache_evictions_total[5m])` | Time series | — |
+| 缓存条目数 | `minios_cache_size` | Time series | — |
+| 运行时间 | `minios_uptime_seconds` | Stat | — |
+| 共享内存空闲页 | `minios_shm_pages_free` | Time series | — |
+
+#### 方法 B：导入预配置 Dashboard
+
+将以下 JSON 保存为 `minios-dashboard.json`，然后在 Grafana 中「Dashboards」→「Import」→ 粘贴导入。
+
+<details>
+<summary>点击展开 Dashboard JSON</summary>
+
+```json
+{
+  "title": "MiniOS 监控面板",
+  "panels": [
+    {
+      "title": "对象总数",
+      "type": "stat",
+      "targets": [{"expr": "minios_objects_total", "legendFormat": ""}],
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4}
+    },
+    {
+      "title": "缓存命中率",
+      "type": "gauge",
+      "targets": [{"expr": "minios_cache_hit_rate_percent", "legendFormat": ""}],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "min": 0, "max": 100}
+      },
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4}
+    },
+    {
+      "title": "运行时间",
+      "type": "stat",
+      "targets": [{"expr": "minios_uptime_seconds", "legendFormat": ""}],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4}
+    },
+    {
+      "title": "缓存命中/未命中速率",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(minios_cache_hits_total[5m])", "legendFormat": "命中数/s"},
+        {"expr": "rate(minios_cache_misses_total[5m])", "legendFormat": "未命中数/s"}
+      ],
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8}
+    },
+    {
+      "title": "存储容量使用",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "minios_storage_bytes_used", "legendFormat": "已用"},
+        {"expr": "minios_storage_bytes_total", "legendFormat": "总量"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}},
+      "gridPos": {"x": 12, "y": 4, "w": 6, "h": 8}
+    },
+    {
+      "title": "缓存淘汰速率",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(minios_cache_evictions_total[5m])", "legendFormat": "淘汰数/s"}
+      ],
+      "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6}
+    },
+    {
+      "title": "共享内存空闲页",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "minios_shm_pages_free", "legendFormat": "空闲页"}
+      ],
+      "gridPos": {"x": 8, "y": 12, "w": 8, "h": 6}
+    }
+  ]
+}
+```
+</details>
+
+### 效果展示
+
+配置完成后，Grafana Dashboard 会实时显示：
+
+```
+┌─────────────┬─────────────┬─────────────┐
+│ 对象总数: 5  │ 命中率: 78% │ 运行: 12分  │
+│    ↑ 3      │   Gauge     │   720s      │
+├─────────────┴─────────────┴─────────────┤
+│         缓存命中/未命中趋势              │
+│    ╱╲╱╲╱╲╱ ╱╲╱╲╱╲ Hit(绿色)           │
+│   ╱        ╱        Miss(红色)          │
+│  时间 →                                │
+├──────────────────────┬─────────────────┤
+│   存储容量使用         │  淘汰速率        │
+│   ████████░░ 45%     │  ╱╲  ╱╲╲        │
+│                      │ ╱  ╲╱  ╲╲       │
+└──────────────────────┴─────────────────┘
+```
+
+### 常用 PromQL 查询参考
+
+```promql
+# 过去 5 分钟缓存命中率平均值
+avg_over_time(minios_cache_hit_rate_percent[5m])
+
+# 过去 1 小时存储增长速率（字节/秒）
+rate(minios_storage_bytes_used[1h])
+
+# 命中率低于 50% 时的告警（可配置 Grafana Alert）
+minios_cache_hit_rate_percent < 50
+
+# 当前使用的缓存算法
+minios_cache_algorithm_info{algorithm="LFU"}
+
+# 过去 15 分钟的命中数
+increase(minios_cache_hits_total[15m])
+```
+
+### 总结
+
+| 步骤 | 命令 | 说明 |
+|------|------|------|
+| 1 | 启动 MiniOS | `--metrics-port 9090` 必须开启 |
+| 2 | 安装 Prometheus | 下载解压 → 写 5 行配置 → 启动 |
+| 3 | 安装 Grafana | `apt install grafana` |
+| 4 | 配数据源 | Grafana UI 里填 `localhost:9091` |
+| 5 | 建 Dashboard | 复制 JSON 导入，或手动拖面板 |
+
+无需修改任何 Rust 代码，三个进程独立运行，彼此通过 HTTP 通信。
