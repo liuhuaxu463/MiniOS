@@ -194,64 +194,86 @@ fn url_decode(s: &str) -> String {
 // Multipart form data parser
 // ============================================================================
 
-struct MultipartField { name: String, _filename: Option<String>, data: Vec<u8> }
+struct MultipartField { name: String, data: Vec<u8> }
 
+/// Parse multipart/form-data body. Uses string splitting on the boundary
+/// (ASCII-only, safe for UTF-8 body content). Returns fields keyed by name.
 fn parse_multipart(headers: &str, body: &str) -> Vec<MultipartField> {
-    // Find boundary from Content-Type header
     let ct = headers.lines()
         .find(|l| l.to_lowercase().starts_with("content-type:"))
         .unwrap_or("");
     let boundary = ct.split("boundary=").nth(1).map(|b| b.trim().trim_matches('"')).unwrap_or("");
     if boundary.is_empty() { return vec![]; }
 
-    let full_boundary = format!("--{}", boundary);
+    // Multipart body format:
+    //   --boundary\r\n  (first, no leading \r\n)
+    //   \r\n--boundary\r\n  (subsequent)
+    //   \r\n--boundary--  (ends with --)
+    let boundary_marker = format!("--{}", boundary);
+    let bm = boundary_marker.as_bytes();
     let body_bytes = body.as_bytes();
     let mut fields = Vec::new();
 
-    // Scan byte-by-byte for boundary markers
-    let mut pos = 0;
-    while pos < body_bytes.len() {
-        // Find next boundary
-        let rem = &body_bytes[pos..];
-        let b_str = full_boundary.as_bytes();
-        if let Some(idx) = rem.windows(b_str.len()).position(|w| w == b_str) {
-            let section_start = pos + idx + b_str.len();
-            // Skip \r\n after boundary
-            let section_start = section_start + if section_start + 2 <= body_bytes.len()
-                && &body_bytes[section_start..section_start+2] == b"\r\n" { 2 } else { 0 };
+    // Find all boundary positions
+    let mut positions: Vec<usize> = Vec::new();
+    let mut search_from = 0;
+    while search_from < body_bytes.len() {
+        if let Some(pos) = find_bytes(&body_bytes[search_from..], bm) {
+            let abs_pos = search_from + pos;
+            // Must be at start of line (preceded by \r\n, or at position 0)
+            let is_start_of_line = abs_pos == 0
+                || (abs_pos >= 2 && &body_bytes[abs_pos-2..abs_pos] == b"\r\n");
+            // Check it's not the end boundary (next two chars are --)
+            let is_end = abs_pos + bm.len() + 2 <= body_bytes.len()
+                && &body_bytes[abs_pos + bm.len()..abs_pos + bm.len() + 2] == b"--";
 
-            // Check if this is the end boundary
-            if section_start >= 2 && section_start - 2 >= b_str.len()
-                && body_bytes[section_start-2-b_str.len()..section_start-2] == *b_str
-                && body_bytes[section_start-2..section_start] == *b"--" { break; }
+            if is_start_of_line && !is_end {
+                positions.push(abs_pos);
+            }
+            search_from = abs_pos + bm.len();
+        } else {
+            break;
+        }
+    }
 
-            // Find next boundary or end
-            let rest = &body_bytes[section_start..];
-            if let Some(next_idx) = rest.windows(b_str.len()).position(|w| w == b_str) {
-                let field_data = &rest[..next_idx];
-                // Trim trailing \r\n
-                let fd = if field_data.ends_with(b"\r\n") { &field_data[..field_data.len()-2] }
-                         else if field_data.ends_with(b"\n") { &field_data[..field_data.len()-1] }
-                         else { field_data };
-                if let Some(field) = parse_field(fd) { fields.push(field); }
-                pos = section_start + next_idx;
-            } else { break; }
-        } else { break; }
+    for i in 0..positions.len() {
+        let section_start = positions[i] + bm.len();
+        // Skip \r\n right after boundary
+        let section_start = if section_start + 2 <= body_bytes.len()
+            && &body_bytes[section_start..section_start+2] == b"\r\n" {
+            section_start + 2 } else { section_start };
+        let section_end = if i + 1 < positions.len() {
+            positions[i + 1] - 2  // -2 to skip the \r\n before next boundary
+        } else {
+            body_bytes.len()
+        };
+
+        let section = &body_bytes[section_start..section_end];
+        if let Some(field) = parse_field_section(section) {
+            fields.push(field);
+        }
     }
     fields
 }
 
-fn parse_field(data: &[u8]) -> Option<MultipartField> {
-    let text = String::from_utf8_lossy(data);
-    let hdr_end = text.find("\r\n\r\n").map(|i| i+4).or_else(|| text.find("\n\n").map(|i| i+2))?;
-    let hdrs = &text[..hdr_end.saturating_sub(if text.as_bytes().get(hdr_end.saturating_sub(1)) == Some(&b'\n') {1}else{0})];
-    let content: Vec<u8> = data[hdr_end..].to_vec();
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
 
-    let cd_line = hdrs.lines().find(|l| l.to_lowercase().starts_with("content-disposition:")).unwrap_or("");
-    let name = cd_line.split("name=\"").nth(1).and_then(|s| s.split('"').next()).map(|s| s.to_string());
-    let filename = cd_line.split("filename=\"").nth(1).and_then(|s| s.split('"').next()).map(|s| s.to_string());
+fn parse_field_section(data: &[u8]) -> Option<MultipartField> {
+    // Find header/body split: \r\n\r\n
+    let split = data.windows(4).position(|w| w == b"\r\n\r\n");
+    let body_start = split.map(|s| s + 4).unwrap_or(0);
+    let headers = std::str::from_utf8(&data[..body_start.saturating_sub(4)]).unwrap_or("");
+    let mut content = &data[body_start..];
+    // Only trim trailing CRLF, not leading (content may start with spaces etc.)
+    while content.ends_with(b"\r\n") { content = &content[..content.len()-2]; }
+    while content.ends_with(b"\n") { content = &content[..content.len()-1]; }
 
-    name.map(|n| MultipartField { name: n, _filename: filename, data: content })
+    let cd = headers.lines().find(|l| l.to_lowercase().starts_with("content-disposition:")).unwrap_or("");
+    let name = cd.split("name=\"").nth(1).and_then(|s| s.split('"').next());
+
+    name.map(|n| MultipartField { name: n.to_string(), data: content.to_vec() })
 }
 
 fn get_form_field_urlencoded(body: &str, field: &str) -> Option<String> {
@@ -273,8 +295,11 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &str, ct: &str,
     let (name, content, ctype, tags) = if ct.contains("multipart/form-data") {
         let fields = parse_multipart(headers, body);
         let name = fields.iter().find(|f| f.name=="name").map(|f| String::from_utf8_lossy(&f.data).to_string());
-        let file_data = fields.iter().find(|f| f.name=="file").map(|f| f.data.clone());
-        let text_data = fields.iter().find(|f| f.name=="content").map(|f| f.data.clone());
+        // Use file data only if non-empty; otherwise fall back to textarea content
+        let file_data = fields.iter().find(|f| f.name=="file")
+            .filter(|f| !f.data.is_empty()).map(|f| f.data.clone());
+        let text_data = fields.iter().find(|f| f.name=="content")
+            .filter(|f| !f.data.is_empty()).map(|f| f.data.clone());
         let content_data = file_data.or(text_data).unwrap_or_default();
         let ct_val = fields.iter().find(|f| f.name=="type").map(|f| String::from_utf8_lossy(&f.data).to_string());
         let tags_val = fields.iter().find(|f| f.name=="tags").map(|f| String::from_utf8_lossy(&f.data).to_string());
@@ -585,18 +610,29 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
 </div>
 
 <h2 style="margin-top:24px">上传对象</h2>
-<form method="POST" action="/api/put" enctype="multipart/form-data" accept-charset="UTF-8">
+<form method="POST" action="/api/put" enctype="multipart/form-data" autocomplete="off">
   <div class="form-row">
-    <div><label>对象名称</label><input name="name" required placeholder="my-document.txt"></div>
-    <div><label>内容类型</label><input name="type" value="text/plain"></div>
+    <div><label>对象名称</label><input name="name" required placeholder="my-document.txt" autocomplete="off"></div>
+    <div><label>内容类型</label><input name="type" value="text/plain" list="mime-types" autocomplete="off">
+    <datalist id="mime-types">
+      <option value="text/plain">
+      <option value="text/html">
+      <option value="application/json">
+      <option value="application/octet-stream">
+      <option value="image/png">
+      <option value="image/jpeg">
+      <option value="application/pdf">
+      <option value="text/css">
+      <option value="application/javascript">
+    </datalist></div>
   </div>
   <div class="form-row">
-    <div><label>标签（JSON 格式）</label><input name="tags" value='{{{{}}}}' placeholder='{{{{"author":"me"}}}}'></div>
+    <div><label>标签（JSON 格式）</label><input name="tags" value='{{{{}}}}' placeholder='{{"author":"me"}}' autocomplete="off"></div>
   </div>
   <label>选择文件（从本地上传）</label>
-  <input type="file" name="file">
+  <input type="file" name="file" autocomplete="off">
   <label>或直接粘贴文件内容</label>
-  <textarea name="content" placeholder="在此粘贴文件内容（如不选择文件则使用此内容）"></textarea>
+  <textarea name="content" placeholder="在此粘贴文件内容（如不选择文件则使用此内容）" autocomplete="off"></textarea>
   <button class="btn btn-primary" type="submit">上传</button>
 </form>
 
