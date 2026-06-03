@@ -494,21 +494,6 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
     let real_cap = cache.capacity();
     let cap = real_cap.max(1);
 
-    // Preload benchmark caches with actual storage data from disk
-    let preload_count = cap.min(n).min(50);
-    let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
-    {
-        let mut st = storage.lock().unwrap();
-        for uuid in object_uuids.iter().take(preload_count) {
-            if let Ok((_info, data)) = st.get(uuid) {
-                preloaded.push((uuid.clone(), CachedObject {
-                    uuid: uuid.clone(), data, name: "bench".to_string(),
-                    content_type: "octet-stream".to_string(), size: 0, tags: "{}".to_string(),
-                }));
-            }
-        }
-    }
-
     // Show real download counts for each object
     let mut freq: Vec<(u64, &str)> = object_uuids.iter()
         .map(|u| (freqs.get(u).copied().unwrap_or(0), &u[..u.len().min(8)]))
@@ -522,7 +507,9 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
     let mut best = ("", 0.0);
     for alg in CacheAlgorithmType::all() {
         let bc = ObjectCache::new(*alg, cap);
-        let r = bc.benchmark_run(&workload, &preloaded);
+        // Empty preload: all caches start cold, letting each algorithm's
+        // eviction strategy naturally determine which objects stay.
+        let r = bc.benchmark_run(&workload, &[]);
         if r.hit_rate > best.1 { best = (alg.as_str(), r.hit_rate); }
         rows.push_str(&format!("<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{:.2}%</td></tr>",
                                alg.as_str(), r.hits, r.misses, r.hit_rate));
@@ -533,12 +520,12 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
         <table><tr><th>算法</th><th>命中</th><th>未命中</th><th>命中率</th></tr>{}</table>
         <p style='margin-top:1em'><strong>最优算法：{}</strong>（{:.2}% 命中率）</p>
         <p style='color:#8590a6;font-size:.85em'>
-        测试条件：{} 个对象，{} 次迭代，缓存容量 {}，预加载 {} 条<br>
+        测试条件：{} 个对象，{} 次迭代，缓存容量 {}，冷启动（无预加载）<br>
         下载记录：{}<br>
         说明：权重 = 实际下载次数 + 1，你越常下载的文件在测试中被访问的次数就越多
         </p>
         <a class='btn-back' href='/manage'>返回</a>",
-        rows, best.0, best.1, n, iterations, cap, preloaded.len(), freq_str)));
+        rows, best.0, best.1, n, iterations, cap, freq_str)));
 }
 
 // ============================================================================

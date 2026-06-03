@@ -800,27 +800,7 @@ fn handle_cache_benchmark(
         return Ok(());
     }
 
-    // Preload a few objects into each benchmark cache (same as current cache capacity)
-    let cap = cache.capacity().min(object_uuids.len());
-    let preload_count = cap.min(32); // preload up to 32 objects for a fair comparison
-
-    let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
-    {
-        let mut st = storage.lock().unwrap();
-        for uuid in object_uuids.iter().take(preload_count) {
-            if let Ok((_info, data)) = st.get(uuid) {
-                preloaded.push((uuid.clone(), CachedObject {
-                    uuid: uuid.clone(),
-                    data,
-                    name: "bench".to_string(),
-                    content_type: "octet-stream".to_string(),
-                    size: 0,
-                    tags: "{}".to_string(),
-                }));
-            }
-        }
-    }
-
+    let cap = cache.capacity().max(1).min(object_uuids.len());
     let n = object_uuids.len();
     let freqs = cache.get_access_frequencies();
     let workload = generate_weighted_workload(&object_uuids, iterations, &freqs);
@@ -829,7 +809,7 @@ fn handle_cache_benchmark(
 
     for alg in CacheAlgorithmType::all() {
         let bench_cache = ObjectCache::new(*alg, cap);
-        let bench = bench_cache.benchmark_run(&workload, &preloaded);
+        let bench = bench_cache.benchmark_run(&workload, &[]);
         let alg_name = bench.algorithm.clone();
         let hits = bench.hits;
         let misses = bench.misses;
@@ -899,29 +879,13 @@ fn handle_cache_sweep(
     let freqs = cache.get_access_frequencies();
     let workload = generate_weighted_workload(&object_uuids, iterations, &freqs);
 
-    // Preload up to 32 objects for fair comparison
-    let max_preload = 32;
-    let mut preloaded: Vec<(String, CachedObject)> = Vec::new();
-    {
-        let mut st = storage.lock().unwrap();
-        for uuid in object_uuids.iter().take(max_preload) {
-            if let Ok((_info, data)) = st.get(uuid) {
-                preloaded.push((uuid.clone(), CachedObject {
-                    uuid: uuid.clone(), data,
-                    name: "bench".to_string(), content_type: "octet-stream".to_string(),
-                    size: 0, tags: "{}".to_string(),
-                }));
-            }
-        }
-    }
-
     let capacities: &[usize] = &[2, 4, 8, 16, 32, 64, 128, 256, 512];
     let mut rows: Vec<ipc::CacheSweepRow> = Vec::new();
 
     for &cap in capacities {
         for alg in CacheAlgorithmType::all() {
             let bench_cache = ObjectCache::new(*alg, cap);
-            let result = bench_cache.benchmark_run(&workload, &preloaded);
+            let result = bench_cache.benchmark_run(&workload, &[]);
             rows.push(ipc::CacheSweepRow {
                 algorithm: alg.as_str().to_string(),
                 capacity: cap,
