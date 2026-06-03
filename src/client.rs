@@ -44,6 +44,10 @@ impl Client {
                 self.cmd_list(*long_format)
             }
 
+            crate::config::ClientCommand::Search { name, tag, content_type, after, before } => {
+                self.cmd_search(name.as_deref(), tag.as_deref(), content_type.as_deref(), after.as_deref(), before.as_deref())
+            }
+
             crate::config::ClientCommand::Status => {
                 self.cmd_status()
             }
@@ -405,6 +409,45 @@ impl Client {
             }
         }
 
+        Ok(())
+    }
+
+    // --- SEARCH ---
+    fn cmd_search(&self, name: Option<&str>, tag: Option<&str>, content_type: Option<&str>, after: Option<&str>, before: Option<&str>) -> Result<()> {
+        let response = self.ipc.request(&ClientMessage::Search {
+            name: name.map(|s| s.to_string()),
+            tag: tag.map(|s| s.to_string()),
+            content_type: content_type.map(|s| s.to_string()),
+            after: after.map(|s| s.to_string()),
+            before: before.map(|s| s.to_string()),
+        })?;
+
+        match response {
+            ServerMessage::ObjectList { objects } => {
+                if objects.is_empty() {
+                    println!("没有匹配的对象。");
+                    return Ok(());
+                }
+                println!("找到 {} 个对象:\n", objects.len());
+                println!("{:<38} {:<24} {:<12} {:<20} {:<16}",
+                         "UUID", "名称", "大小", "创建时间", "类型");
+                println!("{}", "-".repeat(120));
+                for obj in &objects {
+                    if let ServerMessage::ObjectInfo { uuid, name, size, content_type, created_at, tags: _, block_count: _ } = obj {
+                        println!("{:<38} {:<24} {:<12} {:<20} {:<16}",
+                                 uuid,
+                                 if name.len() > 23 { format!("{}...", &name[..20]) } else { name.clone() },
+                                 human_readable_size(*size),
+                                 created_at,
+                                 content_type);
+                    }
+                }
+            }
+            ServerMessage::Error { code, message } => {
+                eprintln!("错误 [{}]: {}", code, message);
+            }
+            _ => { eprintln!("意外响应: {:?}", response); }
+        }
         Ok(())
     }
 

@@ -1,3 +1,4 @@
+use crate::access_log::AccessLog;
 use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType, generate_weighted_workload};
 use crate::config::CliArgs;
 use crate::error::{MiniOsError, Result};
@@ -20,6 +21,7 @@ pub struct Server {
     shm: Arc<SharedMemory>,
     ipc: Mutex<IpcServer>,
     metrics: Mutex<MetricsServer>,
+    access_log: Arc<AccessLog>,
     running: Arc<AtomicBool>,
     start_time: Instant,
 }
@@ -52,6 +54,9 @@ impl Server {
             config.page_size as u32,
         )?;
 
+        // Initialize access log
+        let access_log = Arc::new(AccessLog::new(&config.access_log));
+
         // Initialize cache with selected algorithm
         let cache = Arc::new(ObjectCache::new(alg, config.cache_capacity));
 
@@ -68,6 +73,7 @@ impl Server {
             shm: Arc::new(shm),
             ipc: Mutex::new(ipc),
             metrics: Mutex::new(metrics),
+            access_log,
             running: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
         })
@@ -133,9 +139,10 @@ impl Server {
         let shm = self.shm.clone();
         let running = self.running.clone();
         let start_time = self.start_time;
+        let access_log = self.access_log.clone();
 
         let handler = move |stream: &mut UnixStream| -> Result<()> {
-            handle_client(stream, &storage, &cache, &shm, &running, start_time)
+            handle_client(stream, &storage, &cache, &shm, &running, start_time, &access_log)
         };
 
         // Start IPC server
@@ -199,6 +206,7 @@ fn handle_client(
     shm: &Arc<SharedMemory>,
     running: &Arc<AtomicBool>,
     start_time: Instant,
+    access_log: &Arc<AccessLog>,
 ) -> Result<()> {
     // Read the client request
     let request = match ipc::recv_request(stream) {
@@ -224,16 +232,19 @@ fn handle_client(
             content_type,
             tags,
         } => {
-            handle_put(stream, storage, cache, shm, &name, size, &content_type, &tags)
+            handle_put(stream, storage, cache, shm, &name, size, &content_type, &tags, access_log)
         }
         ClientMessage::Get { key } => {
-            handle_get(stream, storage, cache, shm, &key)
+            handle_get(stream, storage, cache, shm, &key, access_log)
         }
         ClientMessage::Delete { key } => {
-            handle_delete(stream, storage, cache, &key)
+            handle_delete(stream, storage, cache, &key, access_log)
         }
         ClientMessage::List => {
             handle_list(stream, storage)
+        }
+        ClientMessage::Search { name, tag, content_type, after, before } => {
+            handle_search(stream, storage, &name, &tag, &content_type, &after, &before)
         }
         ClientMessage::Status => {
             handle_status(stream, storage, cache, shm, start_time)
@@ -295,6 +306,7 @@ fn handle_put(
     size: u64,
     content_type: &str,
     tags: &str,
+    access_log: &Arc<AccessLog>,
 ) -> Result<()> {
     // Check for duplicate name
     {
@@ -406,6 +418,7 @@ fn handle_put(
                 "Object stored: uuid={}, name='{}', size={}",
                 obj_info.uuid, obj_info.name, obj_info.size
             );
+            access_log.record("PUT", &obj_info.name, &obj_info.uuid, obj_info.size, &obj_info.content_type, &obj_info.tags);
 
             // Send success response with object info
             let obj_msg = ServerMessage::ObjectInfo {
@@ -452,6 +465,7 @@ fn handle_get(
     cache: &Arc<ObjectCache>,
     shm: &Arc<SharedMemory>,
     key: &str,
+    access_log: &Arc<AccessLog>,
 ) -> Result<()> {
     debug!("GET '{}'", key);
 
@@ -556,10 +570,15 @@ fn handle_get(
 
     match done_msg {
         ClientMessage::DataDone { uuid: _, pages_used: _ } => {
-            // Free shared memory pages
             shm.free_pages(start_page, pages_needed)?;
             debug!("GET '{}' complete, pages freed", key);
         }
+        _ => {
+            shm.free_pages(start_page, pages_needed).ok();
+        }
+    }
+    // Log after successful get
+    access_log.record("GET", &info.name, &info.uuid, info.size, &info.content_type, &info.tags);
         ClientMessage::DataError { uuid: _, error: _ } => {
             shm.free_pages(start_page, pages_needed)?;
         }
@@ -577,6 +596,7 @@ fn handle_delete(
     storage: &SharedStorage,
     cache: &Arc<ObjectCache>,
     key: &str,
+    access_log: &Arc<AccessLog>,
 ) -> Result<()> {
     debug!("DELETE '{}'", key);
 
@@ -617,6 +637,7 @@ fn handle_delete(
     cache.remove(&uuid);
 
     info!("Object deleted: uuid={}, key='{}'", uuid, key);
+    access_log.record("DELETE", key, &uuid, 0, "", "{}");
 
     let _ = ipc::send_response(
         stream,
@@ -658,6 +679,85 @@ fn handle_list(
     ipc::send_response(stream, &response)?;
 
     debug!("LIST returned {} objects", count);
+    Ok(())
+}
+
+/// Handle SEARCH request: filter objects by name, tag, type, date range
+fn handle_search(
+    stream: &mut UnixStream,
+    storage: &SharedStorage,
+    name: &Option<String>,
+    tag: &Option<String>,
+    content_type: &Option<String>,
+    after: &Option<String>,
+    before: &Option<String>,
+) -> Result<()> {
+    debug!("SEARCH name={:?} tag={:?} type={:?} after={:?} before={:?}",
+           name, tag, content_type, after, before);
+
+    let all_objects = {
+        let mut st = storage.lock().unwrap();
+        st.list()?
+    };
+
+    let filtered: Vec<_> = all_objects.into_iter().filter(|o| {
+        // Name filter: case-insensitive substring match
+        if let Some(ref n) = name {
+            let n_lower = n.to_lowercase();
+            if !o.name.to_lowercase().contains(&n_lower) {
+                return false;
+            }
+        }
+        // Tag filter: key=value match within the tags JSON
+        if let Some(ref t) = tag {
+            if let Some((k, v)) = t.split_once('=') {
+                let pattern = format!("\"{}\":\"{}\"", k.trim(), v.trim());
+                if !o.tags.contains(&pattern) {
+                    return false;
+                }
+            } else {
+                if !o.tags.to_lowercase().contains(&t.to_lowercase()) {
+                    return false;
+                }
+            }
+        }
+        // Content type filter
+        if let Some(ref ct) = content_type {
+            if !o.content_type.to_lowercase().contains(&ct.to_lowercase()) {
+                return false;
+            }
+        }
+        // Date range filter
+        if let Some(ref a) = after {
+            if let Ok(ad) = chrono::NaiveDate::parse_from_str(a, "%Y-%m-%d") {
+                let adt = ad.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp()).unwrap_or(0);
+                let obj_ts = chrono::NaiveDateTime::parse_from_str(&o.created_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|d| d.and_utc().timestamp()).unwrap_or(0);
+                if obj_ts < adt { return false; }
+            }
+        }
+        if let Some(ref b) = before {
+            if let Ok(bd) = chrono::NaiveDate::parse_from_str(b, "%Y-%m-%d") {
+                let bdt = bd.and_hms_opt(23, 59, 59).map(|d| d.and_utc().timestamp()).unwrap_or(i64::MAX);
+                let obj_ts = chrono::NaiveDateTime::parse_from_str(&o.created_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|d| d.and_utc().timestamp()).unwrap_or(0);
+                if obj_ts > bdt { return false; }
+            }
+        }
+        true
+    }).collect();
+
+    let obj_msgs: Vec<ServerMessage> = filtered.into_iter().map(|info| ServerMessage::ObjectInfo {
+        uuid: info.uuid, name: info.name, size: info.size,
+        content_type: info.content_type, created_at: info.created_at,
+        tags: info.tags, block_count: info.block_count,
+    }).collect();
+
+    let count = obj_msgs.len();
+    let response = ServerMessage::ObjectList { objects: obj_msgs };
+    ipc::send_response(stream, &response)?;
+
+    debug!("SEARCH returned {} objects", count);
     Ok(())
 }
 

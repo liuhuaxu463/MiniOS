@@ -92,6 +92,15 @@ pub enum ClientMessage {
         algorithm: String,
     },
 
+    /// Search objects by filters
+    Search {
+        name: Option<String>,
+        tag: Option<String>,
+        content_type: Option<String>,
+        after: Option<String>,
+        before: Option<String>,
+    },
+
     /// Run cache algorithm benchmark
     CacheBenchmark {
         /// Number of iterations for the simulated workload

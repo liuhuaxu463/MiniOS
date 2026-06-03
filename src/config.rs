@@ -68,6 +68,10 @@ pub struct CliArgs {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
+    /// Path to access log file (persistent request log)
+    #[arg(long, default_value = "")]
+    pub access_log: String,
+
     /// Daemonize the server process
     #[arg(long)]
     pub daemonize: bool,
@@ -114,6 +118,20 @@ pub enum ClientCommand {
     List {
         #[arg(short = 'l', long = "long")]
         long_format: bool,
+    },
+
+    /// Search objects by name, tag, type, or date range
+    Search {
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        #[arg(short = 't', long = "tag")]
+        tag: Option<String>,
+        #[arg(short = 'T', long = "type")]
+        content_type: Option<String>,
+        #[arg(long = "after")]
+        after: Option<String>,
+        #[arg(long = "before")]
+        before: Option<String>,
     },
 
     /// Query server status (including cache stats with algorithm info)
@@ -170,6 +188,7 @@ impl Default for CliArgs {
             cache_warmup: 0,
             metrics_port: 9090,
             worker_threads: 4,
+            access_log: String::new(),
             log_level: "info".to_string(),
             daemonize: false,
             pid_file: "/tmp/minios.pid".to_string(),
