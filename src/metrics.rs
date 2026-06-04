@@ -406,8 +406,15 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
     let h = if objects.is_empty() {
         "<div class='empty'>暂无对象，请先上传</div>".to_string()
     } else {
-        format!("<p>点击文件名即可下载：</p>\
-            <table><tr><th>名称</th><th>UUID</th><th>大小</th><th>创建时间</th></tr>{}</table>", rows)
+        format!("<input type='text' id='searchBox' placeholder='输入关键词实时筛选...' \
+            style='width:100%;padding:8px 12px;margin-bottom:12px;border:1px solid #e0e0e0;\
+            border-radius:6px;font-size:.95em' oninput=\"\
+            var v=this.value.toLowerCase();\
+            document.querySelectorAll('#objTable tbody tr').forEach(function(r){{ \
+              r.style.display=r.textContent.toLowerCase().indexOf(v)>=0?'':'none'\
+            }});\">\
+            <p>点击文件名即可下载：</p>\
+            <table id='objTable'><tr><th>名称</th><th>UUID</th><th>大小</th><th>创建时间</th></tr>{}</table>", rows)
     };
     respond_ok(stream, "text/html; charset=utf-8",
         &page_tab("下载对象", &format!("{}<a class='btn-back' href='/manage'>返回</a>", h), "download"));
@@ -458,7 +465,14 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
         }
     }
     respond_ok(stream, "text/html; charset=utf-8", &page_tab("删除对象",
-        &format!("<table><tr><th>名称</th><th>UUID</th><th>大小</th><th>操作</th></tr>{}</table>\
+        &format!("<input type='text' id='searchBoxDel' placeholder='输入关键词实时筛选...' \
+            style='width:100%;padding:8px 12px;margin-bottom:12px;border:1px solid #e0e0e0;\
+            border-radius:6px;font-size:.95em' oninput=\"\
+            var v=this.value.toLowerCase();\
+            document.querySelectorAll('#delTable tbody tr').forEach(function(r){{ \
+              r.style.display=r.textContent.toLowerCase().indexOf(v)>=0?'':'none'\
+            }});\">\
+            <table id='delTable'><tr><th>名称</th><th>UUID</th><th>大小</th><th>操作</th></tr>{}</table>\
             <a class='btn-back' href='/manage'>返回</a>", rows), "delete"));
 }
 
