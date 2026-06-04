@@ -9,20 +9,20 @@ use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-/// MiniOS CLI client
+/// MiniOS CLI 客户端
 pub struct Client {
     config: CliArgs,
     ipc: IpcClient,
 }
 
 impl Client {
-    /// Create a new client from configuration
+    /// 从配置创建新的客户端实例
     pub fn new(config: CliArgs) -> Self {
         let ipc = IpcClient::new(&config.socket_path);
         Self { config, ipc }
     }
 
-    /// Execute the requested command
+    /// 执行请求的命令，根据命令类型分发到对应的处理方法
     pub fn execute(&self, cmd: &crate::config::ClientCommand) -> Result<()> {
         match cmd {
             crate::config::ClientCommand::Put {
@@ -74,7 +74,10 @@ impl Client {
         }
     }
 
-    // --- PUT ---
+    // --- PUT（上传）---
+
+    /// 执行 PUT（上传）命令：验证标签 JSON、读取本地文件、通过 IPC 发送到服务器，
+    /// 将文件数据写入共享内存，并接收服务器返回的对象信息
     fn cmd_put(
         &self,
         name: &str,
@@ -82,14 +85,14 @@ impl Client {
         content_type: &str,
         tags: &str,
     ) -> Result<()> {
-        // Validate tags JSON
+        // 验证标签 JSON 格式
         if tags != "{}" {
             serde_json::from_str::<serde_json::Value>(tags).map_err(|e| {
                 MiniOsError::InvalidArgument(format!("Invalid tags JSON: {}", e))
             })?;
         }
 
-        // Read the file
+        // 读取文件
         let path = Path::new(file_path);
         if !path.exists() {
             return Err(MiniOsError::Client(format!(
@@ -111,10 +114,10 @@ impl Client {
             name
         );
 
-        // Connect to server
+        // 连接到服务器
         let mut stream = self.ipc.connect()?;
 
-        // Send PUT request
+        // 发送 PUT 请求
         let put_msg = ClientMessage::Put {
             name: name.to_string(),
             size: data_size,
@@ -123,7 +126,7 @@ impl Client {
         };
         ipc::send_message(&mut stream, &put_msg)?;
 
-        // Receive DataReady response (server has allocated shared memory pages)
+        // 接收 DataReady 响应（服务器已分配共享内存页）
         let response = ipc::recv_message(&mut stream)?;
 
         match response {
@@ -134,7 +137,7 @@ impl Client {
                 page_size: _,
                 data_size: _,
             } => {
-                // Open shared memory and write data
+                // 打开共享内存并写入数据
                 let shm = SharedMemory::open(&self.config.shm_name)?;
                 shm.write_pages(start_page, &data)?;
 
@@ -145,14 +148,14 @@ impl Client {
                     start_page + page_count - 1
                 );
 
-                // Send DataDone confirmation
+                // 发送 DataDone 确认
                 let done_msg = ClientMessage::DataDone {
                     uuid: uuid.clone(),
                     pages_used: page_count,
                 };
                 ipc::send_message(&mut stream, &done_msg)?;
 
-                // Receive final response (object info)
+                // 接收最终响应（对象信息）
                 let final_resp = ipc::recv_message(&mut stream)?;
                 match final_resp {
                     ServerMessage::ObjectInfo {
@@ -192,19 +195,22 @@ impl Client {
         Ok(())
     }
 
-    // --- GET ---
+    // --- GET（下载）---
+
+    /// 执行 GET（下载）命令：向服务器请求指定键的对象数据，
+    /// 从共享内存读取数据，并写入到输出文件或标准输出
     fn cmd_get(&self, key: &str, output: Option<&str>) -> Result<()> {
         println!("Downloading '{}'...", key);
 
         let mut stream = self.ipc.connect()?;
 
-        // Send GET request
+        // 发送 GET 请求
         let get_msg = ClientMessage::Get {
             key: key.to_string(),
         };
         ipc::send_message(&mut stream, &get_msg)?;
 
-        // Receive DataReady response
+        // 接收 DataReady 响应
         let response = ipc::recv_message(&mut stream)?;
 
         match response {
@@ -215,7 +221,7 @@ impl Client {
                 page_size: _,
                 data_size,
             } => {
-                // Receive object info
+                // 接收对象信息
                 let info_resp = ipc::recv_message(&mut stream)?;
 
                 let (obj_name, obj_size, obj_type) = match &info_resp {
@@ -230,7 +236,7 @@ impl Client {
                     } => (name.clone(), *size, content_type.clone()),
                     ServerMessage::Error { code, message } => {
                         eprintln!("Error [{}]: {}", code, message);
-                        // Still need to free pages: send DataDone
+                        // 仍需释放页面：发送 DataDone
                         let _ = ipc::send_message(
                             &mut stream,
                             &ClientMessage::DataDone {
@@ -253,21 +259,21 @@ impl Client {
                     }
                 };
 
-                // Open shared memory and read data
+                // 打开共享内存并读取数据
                 let shm = SharedMemory::open(&self.config.shm_name)?;
                 let data = shm.read_pages(start_page, page_count, data_size)?;
 
-                // Send DataDone confirmation
+                // 发送 DataDone 确认
                 let done_msg = ClientMessage::DataDone {
                     uuid: uuid.clone(),
                     pages_used: page_count,
                 };
                 ipc::send_message(&mut stream, &done_msg)?;
 
-                // Write to output file or stdout
+                // 写入输出文件或标准输出
                 let out_path = output.unwrap_or(&obj_name);
                 if out_path == "-" {
-                    // Write to stdout
+                    // 写入标准输出
                     let stdout = io::stdout();
                     let mut handle = stdout.lock();
                     handle.write_all(&data)?;
@@ -299,7 +305,9 @@ impl Client {
         Ok(())
     }
 
-    // --- DELETE ---
+    // --- DELETE（删除）---
+
+    /// 执行 DELETE（删除）命令：向服务器发送删除请求，移除指定键的存储对象
     fn cmd_delete(&self, key: &str) -> Result<()> {
         println!("Deleting '{}'...", key);
 
@@ -322,7 +330,10 @@ impl Client {
         Ok(())
     }
 
-    // --- LIST ---
+    // --- LIST（列表）---
+
+    /// 执行 LIST（列表）命令：查询服务器中所有存储对象的列表，
+    /// 支持简短格式和详细格式两种显示模式
     fn cmd_list(&self, long_format: bool) -> Result<()> {
         let response = self.ipc.request(&ClientMessage::List)?;
 
@@ -336,7 +347,7 @@ impl Client {
                 println!("Objects: {}\n", objects.len());
 
                 if long_format {
-                    // Detailed listing
+                    // 详细列表
                     println!(
                         "{:<38} {:<24} {:<12} {:<20} {:<16}",
                         "UUID", "Name", "Size", "Created", "Type"
@@ -369,7 +380,7 @@ impl Client {
                         }
                     }
                 } else {
-                    // Short listing
+                    // 简短列表
                     println!(
                         "{:<38} {:<24} {:<12}",
                         "UUID", "Name", "Size"
@@ -412,7 +423,10 @@ impl Client {
         Ok(())
     }
 
-    // --- SEARCH ---
+    // --- SEARCH（搜索）---
+
+    /// 执行 SEARCH（搜索）命令：根据名称、标签、内容类型和时间范围等条件
+    /// 搜索匹配的存储对象，并以表格形式展示结果
     fn cmd_search(&self, name: Option<&str>, tag: Option<&str>, content_type: Option<&str>, after: Option<&str>, before: Option<&str>) -> Result<()> {
         let response = self.ipc.request(&ClientMessage::Search {
             name: name.map(|s| s.to_string()),
@@ -451,7 +465,10 @@ impl Client {
         Ok(())
     }
 
-    // --- STATUS ---
+    // --- STATUS（状态）---
+
+    /// 执行 STATUS（状态）命令：查询并显示服务器的运行状态，
+    /// 包括运行时间、存储信息、缓存统计和共享内存使用情况
     fn cmd_status(&self) -> Result<()> {
         let response = self.ipc.request(&ClientMessage::Status)?;
 
@@ -531,7 +548,9 @@ impl Client {
         Ok(())
     }
 
-    // --- CACHE RESIZE ---
+    // --- CACHE RESIZE（缓存调整）---
+
+    /// 执行 CACHE RESIZE（缓存调整）命令：调整服务器端缓存的容量（条目数）
     fn cmd_cache_resize(&self, capacity: usize) -> Result<()> {
         println!("Resizing cache to {} entries...", capacity);
         let response = self.ipc.request(&ClientMessage::CacheResize { capacity })?;
@@ -547,7 +566,9 @@ impl Client {
         Ok(())
     }
 
-    // --- CACHE SWITCH ---
+    // --- CACHE SWITCH（缓存切换）---
+
+    /// 执行 CACHE SWITCH（缓存切换）命令：切换服务器端缓存所使用的淘汰算法
     fn cmd_cache_switch(&self, algorithm: &str) -> Result<()> {
         println!("Switching cache algorithm to {}...", algorithm);
         let response = self.ipc.request(&ClientMessage::CacheSwitch {
@@ -565,7 +586,10 @@ impl Client {
         Ok(())
     }
 
-    // --- CACHE BENCHMARK ---
+    // --- CACHE BENCHMARK（缓存基准测试）---
+
+    /// 执行 CACHE BENCHMARK（缓存基准测试）命令：在服务器端运行缓存性能基准测试，
+    /// 支持标准模式和扫描（sweep）模式，对比不同缓存算法在不同容量下的命中率
     fn cmd_cache_benchmark(&self, iterations: usize, sweep: bool) -> Result<()> {
         let mode = if sweep { "sweep" } else { "standard" };
         println!("Running cache benchmark ({} iterations, {} mode)...\n", iterations, mode);
@@ -610,7 +634,7 @@ impl Client {
             } => {
                 println!("  Workload:  {} unique objects, {} iterations", workload_keys, actual_iters);
                 println!();
-                // Group by capacity for readability
+                // 按容量分组以便阅读
                 println!("  {:<8} {:<8} {:<10} {:<10} {:<10}",
                          "Capacity", "Alg", "Hits", "Misses", "Hit Rate");
                 println!("  {:-<52}", "");
@@ -621,7 +645,7 @@ impl Client {
                     );
                 }
                 println!();
-                // Show the top 3 overall
+                // 显示总体排名前 3
                 println!("  Top 3 (algorithm, capacity) configurations:");
                 for (i, row) in rows.iter().take(3).enumerate() {
                     println!("    {}. {} @ cap={} → {:.2}% hit rate",
@@ -636,11 +660,16 @@ impl Client {
         Ok(())
     }
 
-    // --- START ---
+    // --- START（启动）---
+
+    /// 执行 START（启动）命令：启动 MiniOS 服务器。
+    /// 支持守护进程（daemon）模式和前台模式：
+    /// - 守护进程模式：以后台子进程方式启动服务器
+    /// - 前台模式：在当前进程中启动服务器并阻塞直到停止
     fn cmd_start(&self, daemon: bool) -> Result<()> {
-        // Check if server is already running
+        // 检查服务器是否已在运行
         if let Ok(mut stream) = UnixStream::connect(&self.config.socket_path) {
-            // Server appears to be running
+            // 服务器似乎正在运行
             println!("Server is already running (socket {} exists).", self.config.socket_path);
             let _ = ipc::send_message(&mut stream, &ClientMessage::Status);
             if let Ok(resp) = ipc::recv_message(&mut stream) {
@@ -651,25 +680,25 @@ impl Client {
             return Ok(());
         }
 
-        // Start the server
+        // 启动服务器
         if daemon {
             println!("Starting MiniOS server in daemon mode...");
             self.launch_daemon()?;
-            // Wait a moment for the server to start
+            // 等待服务器启动
             std::thread::sleep(std::time::Duration::from_millis(500));
 
-            // Verify it started
+            // 验证服务器是否已启动
             match UnixStream::connect(&self.config.socket_path) {
                 Ok(_) => println!("✓ Server started successfully."),
                 Err(_) => eprintln!("⚠ Server may not have started. Check logs."),
             }
         } else {
             println!("Starting MiniOS server...");
-            // Run server in foreground
+            // 在前台运行服务器
             let mut server = crate::server::Server::new(self.config.clone())?;
             server.start()?;
 
-            // Block until stopped
+            // 阻塞直到停止
             println!("Server running. Press Ctrl+C to stop.");
             while server.is_running() {
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -681,16 +710,18 @@ impl Client {
         Ok(())
     }
 
-    /// Launch the server as a daemon process
+    /// 以后台守护进程方式启动服务器：
+    /// 获取当前可执行文件路径，使用 --server 标志以子进程方式启动，
+    /// 并将标准输入输出重定向到 /dev/null，最后写入 PID 文件
     fn launch_daemon(&self) -> Result<()> {
         use std::process::Command;
 
-        // Get the current executable path
+        // 获取当前可执行文件路径
         let exe = std::env::current_exe().map_err(|e| {
             MiniOsError::Client(format!("Cannot determine executable path: {}", e))
         })?;
 
-        // Launch as background process with --server flag
+        // 使用 --server 标志以后台进程启动
         let child = Command::new(&exe)
             .arg("--server")
             .arg("--socket-path")
@@ -730,7 +761,10 @@ impl Client {
         Ok(())
     }
 
-    // --- STOP ---
+    // --- STOP（停止）---
+
+    /// 执行 STOP（停止）命令：通过 IPC 向服务器发送停止请求，
+    /// 如果无法正常停止则通过 PID 文件强制终止服务器进程
     fn cmd_stop(&self) -> Result<()> {
         println!("Stopping MiniOS server...");
 
@@ -738,12 +772,12 @@ impl Client {
             Ok(response) => match response {
                 ServerMessage::Ok { message } => {
                     println!("✓ {}", message.unwrap_or_else(|| "Server stopped".to_string()));
-                    // Clean up PID file
+                    // 清理 PID 文件
                     server::remove_pid_file(&self.config.pid_file);
                 }
                 ServerMessage::Error { code, message } => {
                     eprintln!("Error [{}]: {}", code, message);
-                    // Try to kill by PID
+                    // 尝试通过 PID 终止
                     self.force_stop();
                 }
                 _ => {}
@@ -757,7 +791,9 @@ impl Client {
         Ok(())
     }
 
-    /// Force-stop the server by reading PID file and sending SIGTERM
+    /// 通过读取 PID 文件并发送 SIGTERM 强制停止服务器。
+    /// 如果进程未响应 SIGTERM，则发送 SIGKILL 强制终止，
+    /// 最后清理 PID 文件
     fn force_stop(&self) {
         if let Some(pid) = server::read_pid_file(&self.config.pid_file) {
             if server::is_process_running(pid) {

@@ -9,14 +9,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+/// 指标服务器，提供 Web 管理界面和 Prometheus 监控端点。
 pub struct MetricsServer {
     port: u16,
     running: Arc<AtomicBool>,
 }
 
 impl MetricsServer {
+    /// 创建一个新的 `MetricsServer` 实例，绑定到指定端口。
     pub fn new(port: u16) -> Self { Self { port, running: Arc::new(AtomicBool::new(false)) } }
 
+    /// 启动指标服务器，在后台线程中监听 TCP 连接。
+    /// `port=0` 表示禁用 Web 管理界面。
+    /// 每个连接都会生成一个新线程来处理，通过 `dispatch` 函数路由请求。
     pub fn start(&mut self, storage: SharedStorage, cache: Arc<ObjectCache>,
                  shm: Arc<SharedMemory>, start_time: Instant) {
         if self.port == 0 { info!("Web 管理界面已禁用 (port=0)"); return; }
@@ -40,16 +45,18 @@ impl MetricsServer {
             }
         });
     }
+
+    /// 停止指标服务器，通知后台线程退出 accept 循环。
     pub fn stop(&mut self) { self.running.store(false, Ordering::SeqCst); }
 }
 
 // ============================================================================
-// HTTP parsing
+// HTTP 解析
 // ============================================================================
 
-/// Read an HTTP request. Returns (headers_as_string, body_as_raw_bytes).
-/// Headers are guaranteed ASCII, body is kept as raw Vec<u8> to preserve
-/// binary data (PNG, JPEG, etc.) without corruption.
+/// 读取 HTTP 请求。返回 `(头部字符串, 原始正文字节)`。
+/// 头部保证为 ASCII 编码，正文保留为原始 `Vec<u8>` 以避免
+/// 二进制数据（PNG、JPEG 等）损坏。
 fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
     stream.set_nonblocking(false).ok();
@@ -83,7 +90,7 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
                     }
                 }
 
-                // Copy body as raw bytes — NO string conversion
+                // 将正文复制为原始字节 —— 不进行字符串转换
                 let body_bytes = buf[body_offset..total].to_vec();
                 return Some((hdr_str, body_bytes));
             }
@@ -97,6 +104,7 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     Some((headers, body_bytes))
 }
 
+/// 从 TCP 流中读取数据。处理 `WouldBlock` 错误时自动等待并重试一次。
 fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
     match stream.read(buf) {
         Ok(n) if n > 0 => Some(n),
@@ -109,6 +117,12 @@ fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// 解析 HTTP 请求并分发到对应的处理器。
+/// 根据请求方法和路径路由到不同的 handler 函数：
+/// - `/metrics` 返回 Prometheus 指标
+/// - `/` 返回系统仪表盘
+/// - `/manage` 返回管理页面
+/// - `/api/put`、`/api/get`、`/api/delete` 等为 API 端点
 fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>,
             shm: &Arc<SharedMemory>, start_time: Instant) {
     let (headers, body_bytes) = match read_request(&mut stream) {
@@ -150,11 +164,13 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
     }
 }
 
+/// 解析 HTTP 请求的第一行，提取出 `(方法, 路径)`。
 fn parse_first(line: &str) -> (&str, &str) {
     let p: Vec<&str> = line.split_whitespace().collect();
     if p.len() >= 2 { (p[0], p[1]) } else { ("GET", "/") }
 }
 
+/// 向客户端发送 HTTP 响应，包含状态码、内容类型和正文。
 fn respond(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
     let b = body.as_bytes();
     let r = format!("HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -162,10 +178,13 @@ fn respond(stream: &mut TcpStream, status: &str, ct: &str, body: &str) {
     let _ = stream.write_all(r.as_bytes());
     let _ = stream.write_all(b);
 }
+
+/// 向客户端发送 200 OK HTTP 响应。
 fn respond_ok(stream: &mut TcpStream, ct: &str, body: &str) {
     respond(stream, "200 OK", ct, body);
 }
 
+/// 从 HTTP 请求的 URL 查询字符串中提取指定键的值。
 fn get_query_param(req: &str, key: &str) -> Option<String> {
     let path = req.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("");
     let qs = path.find('?').map(|i| &path[i+1..]).unwrap_or("");
@@ -178,6 +197,7 @@ fn get_query_param(req: &str, key: &str) -> Option<String> {
     None
 }
 
+/// 对 URL 编码的字符串进行解码（处理 `%XX` 和 `+` 字符）。
 fn url_decode(s: &str) -> String {
     let mut r = String::new(); let b = s.as_bytes(); let mut i = 0;
     while i < b.len() {
@@ -194,13 +214,13 @@ fn url_decode(s: &str) -> String {
 }
 
 // ============================================================================
-// Multipart form data parser
+// Multipart 表单数据解析
 // ============================================================================
 
 struct MultipartField { name: String, data: Vec<u8> }
 
-/// Parse multipart/form-data body. Takes raw bytes to preserve binary
-/// file contents (PNG, JPEG, etc.) without corruption.
+/// 解析 multipart/form-data 正文。接收原始字节以保留二进制
+/// 文件内容（PNG、JPEG 等），避免数据损坏。
 fn parse_multipart(headers: &str, body: &[u8]) -> Vec<MultipartField> {
     let ct = headers.lines()
         .find(|l| l.to_lowercase().starts_with("content-type:"))
@@ -213,16 +233,16 @@ fn parse_multipart(headers: &str, body: &[u8]) -> Vec<MultipartField> {
     let body_bytes = body;
     let mut fields = Vec::new();
 
-    // Find all boundary positions
+    // 查找所有边界标记的位置
     let mut positions: Vec<usize> = Vec::new();
     let mut search_from = 0;
     while search_from < body_bytes.len() {
         if let Some(pos) = find_bytes(&body_bytes[search_from..], bm) {
             let abs_pos = search_from + pos;
-            // Must be at start of line (preceded by \r\n, or at position 0)
+            // 必须位于行首（前面是 \r\n，或者在位置 0）
             let is_start_of_line = abs_pos == 0
                 || (abs_pos >= 2 && &body_bytes[abs_pos-2..abs_pos] == b"\r\n");
-            // Check it's not the end boundary (next two chars are --)
+            // 检查不是结束边界（接下来的两个字符是 --）
             let is_end = abs_pos + bm.len() + 2 <= body_bytes.len()
                 && &body_bytes[abs_pos + bm.len()..abs_pos + bm.len() + 2] == b"--";
 
@@ -237,12 +257,12 @@ fn parse_multipart(headers: &str, body: &[u8]) -> Vec<MultipartField> {
 
     for i in 0..positions.len() {
         let section_start = positions[i] + bm.len();
-        // Skip \r\n right after boundary
+        // 跳过紧接在边界后面的 \r\n
         let section_start = if section_start + 2 <= body_bytes.len()
             && &body_bytes[section_start..section_start+2] == b"\r\n" {
             section_start + 2 } else { section_start };
         let section_end = if i + 1 < positions.len() {
-            positions[i + 1] - 2  // -2 to skip the \r\n before next boundary
+            positions[i + 1] - 2  // -2 是为了跳过一个边界前面的 \r\n
         } else {
             body_bytes.len()
         };
@@ -255,17 +275,19 @@ fn parse_multipart(headers: &str, body: &[u8]) -> Vec<MultipartField> {
     fields
 }
 
+/// 在字节数组中查找子序列，返回第一次出现的位置。
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// 解析单个 multipart 表单字段区域，提取字段名称和数据内容。
 fn parse_field_section(data: &[u8]) -> Option<MultipartField> {
-    // Find header/body split: \r\n\r\n
+    // 查找头部/正文分隔符：\r\n\r\n
     let split = data.windows(4).position(|w| w == b"\r\n\r\n");
     let body_start = split.map(|s| s + 4).unwrap_or(0);
     let headers = std::str::from_utf8(&data[..body_start.saturating_sub(4)]).unwrap_or("");
     let mut content = &data[body_start..];
-    // Only trim trailing CRLF, not leading (content may start with spaces etc.)
+    // 只修剪尾部的 CRLF，不修剪头部（内容可能以空格等字符开头）
     while content.ends_with(b"\r\n") { content = &content[..content.len()-2]; }
     while content.ends_with(b"\n") { content = &content[..content.len()-1]; }
 
@@ -275,8 +297,8 @@ fn parse_field_section(data: &[u8]) -> Option<MultipartField> {
     name.map(|n| MultipartField { name: n.to_string(), data: content.to_vec() })
 }
 
-/// Parse URL-encoded form body from raw bytes. Converts to string only
-/// for parsing the ASCII key=value pairs — field values get URL-decoded.
+/// 从原始字节中解析 URL 编码的表单正文。仅对 ASCII 的 key=value 对
+/// 进行字符串转换以完成解析 —— 字段值会进行 URL 解码。
 fn get_form_field_urlencoded(body: &[u8], field: &str) -> Option<String> {
     let bstr = String::from_utf8_lossy(body);
     for pair in bstr.split('&') {
@@ -289,15 +311,18 @@ fn get_form_field_urlencoded(body: &[u8], field: &str) -> Option<String> {
 }
 
 // ============================================================================
-// Handlers
+// 请求处理器
 // ============================================================================
 
+/// 处理 Web 上传请求（POST /api/put）。
+/// 支持 multipart/form-data 和 URL 编码两种表单格式。
+/// 将对象写入存储并更新缓存。
 fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
                   storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let (name, content, ctype, tags) = if ct.contains("multipart/form-data") {
         let fields = parse_multipart(headers, body);
         let name = fields.iter().find(|f| f.name=="name").map(|f| String::from_utf8_lossy(&f.data).to_string());
-        // Use file data only if non-empty; otherwise fall back to textarea content
+        // 仅在文件数据非空时使用文件数据；否则回退到文本域内容
         let file_data = fields.iter().find(|f| f.name=="file")
             .filter(|f| !f.data.is_empty()).map(|f| f.data.clone());
         let text_data = fields.iter().find(|f| f.name=="content")
@@ -307,7 +332,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
         let tags_val = fields.iter().find(|f| f.name=="tags").map(|f| String::from_utf8_lossy(&f.data).to_string());
         (name.unwrap_or_default(), content_data, ct_val.unwrap_or_else(|| "application/octet-stream".to_string()), tags_val.unwrap_or_else(|| "{}".to_string()))
     } else {
-        // URL-encoded form
+        // URL 编码表单
         let n = get_form_field_urlencoded(body, "name").unwrap_or_default();
         let c = get_form_field_urlencoded(body, "content").unwrap_or_default();
         let t = get_form_field_urlencoded(body, "type").unwrap_or_else(|| "text/plain".to_string());
@@ -346,9 +371,12 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
     }
 }
 
+/// 处理 Web 下载/列出对象请求（GET /api/get）。
+/// 携带 `?key=` 参数时下载指定对象（优先从缓存读取），
+/// 不带参数时展示所有已存储对象的可下载列表。
 fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     if let Some(key) = get_query_param(first_line, "key") {
-        // Step 1: resolve key to UUID (find_info reads only metadata, no data blocks)
+        // 第一步：将 key 解析为 UUID（find_info 只读取元数据，不读取数据块）
         let info = match storage.lock().unwrap().find_info(&key) {
             Ok(info) => info,
             Err(e) => {
@@ -358,7 +386,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
             }
         };
 
-        // Step 2: check cache by UUID first (same logic as CLI handle_get)
+        // 第二步：先按 UUID 查询缓存（逻辑与 CLI 的 handle_get 相同）
         let data = if let Some(cached) = cache.get(&info.uuid) {
             debug!("Web GET cache HIT for uuid={}", info.uuid);
             cached.data
@@ -367,7 +395,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
             let mut st = storage.lock().unwrap();
             match st.get(&key) {
                 Ok((_info, storage_data)) => {
-                    // Update cache by UUID so subsequent GETs hit
+                    // 按 UUID 更新缓存，以便后续 GET 能命中
                     cache.put(&info.uuid, CachedObject {
                         uuid: info.uuid.clone(), data: storage_data.clone(),
                         name: info.name.clone(), content_type: info.content_type.clone(),
@@ -383,7 +411,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
             }
         };
 
-        // Send as download
+        // 以文件下载方式发送
         let hdr = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
             Content-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\n\
             Connection: close\r\n\r\n", info.content_type, info.name, data.len());
@@ -392,7 +420,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
         return;
     }
 
-    // No key — list objects
+    // 未提供 key —— 列出所有对象
     let mut st = storage.lock().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
@@ -420,6 +448,9 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
         &page_tab("下载对象", &format!("{}<a class='btn-back' href='/manage'>返回</a>", h), "download"));
 }
 
+/// 处理 Web 删除请求（GET /api/delete）。
+/// 携带 `?key=` 参数时删除指定对象并从缓存中移除，
+/// 不带参数时展示所有可删除对象的列表（含确认删除链接）。
 fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     if let Some(key) = get_query_param(first_line, "key") {
         let uuid = {
@@ -448,7 +479,7 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
         return;
     }
 
-    // No key — list objects with delete links
+    // 未提供 key —— 列出带有删除链接的对象
     let mut st = storage.lock().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
@@ -476,6 +507,8 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
             <a class='btn-back' href='/manage'>返回</a>", rows), "delete"));
 }
 
+/// 处理缓存容量调整请求（POST /api/resize）。
+/// 从表单中读取新的容量值并调用 `cache.resize()`。
 fn handle_web_resize(stream: &mut TcpStream, body: &[u8], cache: &Arc<ObjectCache>) {
     let cap_str = get_form_field_urlencoded(body, "capacity").unwrap_or_default();
     match cap_str.parse::<usize>() {
@@ -494,6 +527,8 @@ fn handle_web_resize(stream: &mut TcpStream, body: &[u8], cache: &Arc<ObjectCach
     }
 }
 
+/// 处理对象搜索请求（GET /api/search）。
+/// 支持按名称、标签、类型关键词模糊搜索，以及按创建时间范围（after/before）筛选。
 fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage) {
     let name = get_query_param(first_line, "name");
     let tag = get_query_param(first_line, "tag");
@@ -516,7 +551,7 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
         if let Some(ref ct) = ctype {
             if !o.content_type.to_lowercase().contains(&ct.to_lowercase()) { return false; }
         }
-        // after/before — simple string prefix match on date portion of created_at
+        // after/before —— 对 created_at 的日期部分进行简单字符串前缀匹配
         if let Some(ref a) = after {
             if &o.created_at[..a.len().min(10)] < &a[..a.len().min(10)] { return false; }
         }
@@ -562,6 +597,9 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
         query_desc, filtered.len(), rows), "manage"));
 }
 
+/// 处理缓存算法性能基准测试请求（GET /api/benchmark）。
+/// 对所有缓存算法运行相同的工作负载（基于实际下载频率加权生成），
+/// 以冷启动方式对比各算法的命中率，展示最优算法。
 fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let object_uuids: Vec<String> = {
         storage.lock().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
@@ -578,7 +616,7 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
     let real_cap = cache.capacity();
     let cap = real_cap.max(1);
 
-    // Show real download counts for each object
+    // 显示每个对象的实际下载次数
     let mut freq: Vec<(u64, &str)> = object_uuids.iter()
         .map(|u| (freqs.get(u).copied().unwrap_or(0), &u[..u.len().min(8)]))
         .collect();
@@ -591,8 +629,8 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
     let mut best = ("", 0.0);
     for alg in CacheAlgorithmType::all() {
         let bc = ObjectCache::new(*alg, cap);
-        // Empty preload: all caches start cold, letting each algorithm's
-        // eviction strategy naturally determine which objects stay.
+        // 冷启动无预加载：所有缓存从空开始，让每种算法的淘汰策略
+        // 自然决定哪些对象保留在缓存中。
         let r = bc.benchmark_run(&workload, &[]);
         if r.hit_rate > best.1 { best = (alg.as_str(), r.hit_rate); }
         rows.push_str(&format!("<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td>{:.2}%</td></tr>",
@@ -613,12 +651,16 @@ fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: 
 }
 
 // ============================================================================
-// Page builders
+// 页面构建器
 // ============================================================================
 
+/// 构建指定标题的基础 HTML 页面（无自动刷新，无标签页激活状态）。
 fn page(title: &str, body: &str) -> String { page_with_refresh(title, body, false, "") }
+
+/// 构建指定标题和标签页激活状态的 HTML 页面（无自动刷新）。
 fn page_tab(title: &str, body: &str, tab: &str) -> String { page_with_refresh(title, body, false, tab) }
 
+/// 构建完整的 HTML 页面，支持自动刷新和导航标签页高亮。
 fn page_with_refresh(title: &str, body: &str, auto_refresh: bool, active_tab: &str) -> String {
     let refresh = if auto_refresh { "<meta http-equiv=\"refresh\" content=\"5\">" } else { "" };
     let (a0,a1,a2,a3) = match active_tab {
@@ -691,6 +733,9 @@ input[type=file]{{padding:8px}}
     refresh, title, a0,a1,a2,a3, title, body, env!("CARGO_PKG_VERSION"))
 }
 
+/// 构建对象管理页面（/manage 路由）。
+/// 包含存储和缓存概览统计、上传表单、缓存容量控制、
+/// 搜索引擎入口以及完整对象列表。
 fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> String {
     let mut st = storage.lock().unwrap();
     let objects = st.list().unwrap_or_default();
@@ -776,6 +821,9 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
     ), "manage")
 }
 
+/// 构建系统总览仪表盘页面（/ 路由）。
+/// 展示运行时间、对象总数、缓存命中率、存储使用率、
+/// 共享内存状态等信息，并每 5 秒自动刷新。
 fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<SharedMemory>, start_time: Instant) -> String {
     let st = storage.lock().unwrap();
     let status = st.status();
@@ -818,9 +866,11 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
 }
 
 // ============================================================================
-// Prometheus metrics
+// Prometheus 监控指标
 // ============================================================================
 
+/// 构建 Prometheus 文本格式的监控指标输出（/metrics 端点）。
+/// 包含存储、缓存和共享内存的各项 gauge 和 counter 指标。
 fn build_metrics(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<SharedMemory>, start_time: Instant) -> String {
     let st = storage.lock().unwrap(); let status = st.status(); drop(st);
     let cs = cache.stats(); let uptime = start_time.elapsed().as_secs();
@@ -844,12 +894,17 @@ fn build_metrics(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<Sh
     m
 }
 
+/// 将字节数格式化为人类可读的字符串（如 `1.50 KB`、`3.00 MB`）。
 fn fmt_bytes(bytes: u64) -> String {
     let u = ["B","KB","MB","GB"]; let (mut v,mut i)=(bytes as f64,0);
     while v>=1024.0 && i<u.len()-1 { v/=1024.0; i+=1; }
     format!("{:.2} {}", v, u[i])
 }
+
+/// 计算百分比：`(part / total) * 100`。当 total 为 0 时返回 0.0。
 fn pct(part: u64, total: u64) -> f64 { if total==0 {0.0} else {part as f64/total as f64*100.0} }
+
+/// 将秒数格式化为人类可读的运行时间字符串（如 `30 秒`、`5 分 30 秒`、`2 时 15 分`）。
 fn fmt_uptime(s: u64) -> String {
     if s<60 {format!("{} 秒",s)} else if s<3600 {format!("{} 分 {} 秒",s/60,s%60)}
     else {format!("{} 时 {} 分",s/3600,(s%3600)/60)}

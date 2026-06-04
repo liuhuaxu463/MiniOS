@@ -2,32 +2,32 @@ use crate::error::{MiniOsError, Result};
 use log::{debug, info, warn};
 
 // ============================================================================
-// Constants
+// 常量
 // ============================================================================
 
-/// Magic number for shared memory header identification
-const SHM_MAGIC: u32 = 0x4D4F5348; // "MOSH" in little-endian
-/// Current shared memory layout version
+/// 用于共享内存头部标识的魔数（小端序的 "MOSH"）
+const SHM_MAGIC: u32 = 0x4D4F5348; // 小端序的 "MOSH"
+/// 当前共享内存布局版本号
 const SHM_VERSION: u32 = 1;
-/// Header size in bytes
+/// 共享内存头部大小（字节）
 const SHM_HEADER_SIZE: u64 = 64;
 
 // ============================================================================
-// Shared Memory Header (first 64 bytes of the shared memory region)
+// 共享内存头部（共享内存区域的前 64 字节）
 // ============================================================================
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct ShmHeader {
-    magic: u32,         // offset 0
-    version: u32,       // offset 4
-    total_size: u64,    // offset 8
-    page_size: u32,     // offset 16
-    num_pages: u32,     // offset 20
-    bitmap_offset: u64, // offset 24
-    data_offset: u64,   // offset 32
-    free_pages: u32,    // offset 40
-    reserved: [u8; 20], // offset 44 (pad to 64 bytes)
+    magic: u32,         // 偏移量 0
+    version: u32,       // 偏移量 4
+    total_size: u64,    // 偏移量 8
+    page_size: u32,     // 偏移量 16
+    num_pages: u32,     // 偏移量 20
+    bitmap_offset: u64, // 偏移量 24
+    data_offset: u64,   // 偏移量 32
+    free_pages: u32,    // 偏移量 40
+    reserved: [u8; 20], // 偏移量 44（填充至 64 字节）
 }
 
 impl ShmHeader {
@@ -35,7 +35,7 @@ impl ShmHeader {
         let num_pages = ((total_size - SHM_HEADER_SIZE) / page_size as u64) as u32;
         let bitmap_bytes = (num_pages as u64 + 7) / 8;
         let bitmap_offset = SHM_HEADER_SIZE;
-        let data_offset = bitmap_offset + ((bitmap_bytes + 7) / 8) * 8; // 8-byte aligned
+        let data_offset = bitmap_offset + ((bitmap_bytes + 7) / 8) * 8; // 8 字节对齐
 
         Self {
             magic: SHM_MAGIC,
@@ -69,7 +69,7 @@ impl ShmHeader {
         buf[off..off + 8].copy_from_slice(&self.data_offset.to_le_bytes());
         off += 8;
         buf[off..off + 4].copy_from_slice(&self.free_pages.to_le_bytes());
-        // rest is padding
+        // 剩余部分为填充字节
 
         buf
     }
@@ -142,50 +142,49 @@ impl ShmHeader {
 }
 
 // ============================================================================
-// Shared Memory Manager
+// 共享内存管理器
 // ============================================================================
 
-/// Manages the shared memory region used for client-server data transfer.
+/// 管理用于客户端-服务器数据传输的共享内存区域。
 ///
-/// The server creates and owns the shared memory. Clients map it read/write
-/// for data transfer during Put/Get operations.
+/// 服务器创建并拥有共享内存。客户端将其映射为可读写，
+/// 以便在 Put/Get 操作期间进行数据传输。
 ///
-/// ## Layout
+/// ## 内存布局
 /// ```text
 /// +------------------+
-/// | Header (64 B)    | magic, version, sizes, offsets
+/// | 头部 (64 B)      | 魔数、版本、大小、偏移量
 /// +------------------+
-/// | Page Bitmap      | one bit per page (1 = used, 0 = free)
+/// | 页面位图         | 每页一位（1 = 已使用，0 = 空闲）
 /// +------------------+
-/// | Data Pages       | num_pages * page_size bytes
+/// | 数据页           | num_pages * page_size 字节
 /// +------------------+
 /// ```
 pub struct SharedMemory {
-    /// Raw pointer to the mapped shared memory
+    /// 指向已映射共享内存的原始指针
     ptr: *mut u8,
-    /// Total size of the mapping
+    /// 映射区域的总大小（字节）
     size: u64,
-    /// Name of the shared memory object
+    /// 共享内存对象的名称
     name: String,
-    /// File descriptor for the shared memory object
+    /// 共享内存对象的文件描述符
     shm_fd: i32,
-    /// Whether this instance owns (created) the shared memory
+    /// 此实例是否为共享内存的创建者（所有者）
     is_owner: bool,
 }
 
-// Safety: SharedMemory wraps a raw pointer from mmap, which is safe to
-// share across threads on Linux.
+// 安全性说明：SharedMemory 封装了来自 mmap 的原始指针，
+// 在 Linux 上跨线程共享是安全的。
 unsafe impl Send for SharedMemory {}
 unsafe impl Sync for SharedMemory {}
 
 impl SharedMemory {
-    /// Read the header from the shared memory region (always reads the
-    /// authoritative copy from mmap, never caches).
+    /// 从共享内存区域读取头部（始终从 mmap 读取权威副本，绝不缓存）。
     fn read_header(&self) -> ShmHeader {
         unsafe { std::ptr::read(self.ptr as *const ShmHeader) }
     }
 
-    /// Write a header back to the shared memory region.
+    /// 将头部写回共享内存区域。
     #[allow(dead_code)]
     fn write_header(&self, header: &ShmHeader) {
         unsafe {
@@ -193,15 +192,16 @@ impl SharedMemory {
         }
     }
 
-    /// Get a mutable reference to the header in shared memory.
+    /// 获取共享内存中头部的可变原始指针。
     fn header_mut_ptr(&self) -> *mut ShmHeader {
         self.ptr as *mut ShmHeader
     }
 
-    /// Create a new shared memory region (server-side)
+    /// 创建新的共享内存区域（服务器端调用）。
     ///
-    /// Uses raw system calls (shm_open, ftruncate, mmap). Only call this
-    /// from the server process.
+    /// 使用原始系统调用（`shm_open`、`ftruncate`、`mmap`）分配和初始化
+    /// 共享内存。仅应从服务器进程调用此方法。如果共享内存对象已存在
+    /// （例如，上次运行崩溃后残留），则会先取消链接再重试。
     pub fn create(name: &str, total_size: u64, page_size: u32) -> Result<Self> {
         let shm_name = if name.starts_with('/') {
             name.to_string()
@@ -214,12 +214,12 @@ impl SharedMemory {
             shm_name, total_size, page_size
         );
 
-        // Create shared memory object
+        // 创建共享内存对象
         let shm_name_c = std::ffi::CString::new(shm_name.as_bytes())
             .map_err(|e| MiniOsError::Shm(format!("Invalid shm name: {}", e)))?;
 
-        // Try to create the shared memory object.
-        // If it already exists from a previous crashed run, unlink and retry.
+        // 尝试创建共享内存对象。
+        // 如果因之前崩溃运行而已经存在，则取消链接并重试。
         let fd = loop {
             let fd = unsafe {
                 libc::shm_open(
@@ -237,7 +237,7 @@ impl SharedMemory {
             if err.raw_os_error() == Some(libc::EEXIST) {
                 warn!("Shared memory already exists, attempting to re-create...");
                 unsafe { libc::shm_unlink(shm_name_c.as_ptr()) };
-                // Loop back to try shm_open again
+                // 循环回到 shm_open 重试
             } else {
                 return Err(MiniOsError::Shm(format!(
                     "shm_open failed: {}",
@@ -246,7 +246,7 @@ impl SharedMemory {
             }
         };
 
-        // Set size
+        // 设置共享内存大小
         let ret = unsafe { libc::ftruncate(fd, total_size as libc::off_t) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -255,7 +255,7 @@ impl SharedMemory {
             return Err(MiniOsError::Shm(format!("ftruncate failed: {}", err)));
         }
 
-        // Map into memory
+        // 映射到进程地址空间
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -274,7 +274,7 @@ impl SharedMemory {
             return Err(MiniOsError::Shm(format!("mmap failed: {}", err)));
         }
 
-        // Initialize header — write via raw pointer, then read back to verify
+        // 初始化头部 — 通过原始指针写入头部字节
         let header = ShmHeader::new(total_size, page_size);
         let header_bytes = header.to_bytes();
         unsafe {
@@ -286,7 +286,7 @@ impl SharedMemory {
             );
         }
 
-        // Initialize bitmap (all zeros = all free)
+        // 初始化位图（全部清零 = 全部空闲）
         let bitmap_size = (header.num_pages as u64 + 7) / 8;
         let bitmap_ptr = unsafe { (ptr as *mut u8).add(header.bitmap_offset as usize) };
         unsafe {
@@ -311,7 +311,10 @@ impl SharedMemory {
         })
     }
 
-    /// Open an existing shared memory region (client-side)
+    /// 打开已有的共享内存区域（客户端调用）。
+    ///
+    /// 客户端通过此方法连接到服务器已创建的共享内存。
+    /// 首先只映射头部以获取实际的总大小，然后取消映射并以完整大小重新映射。
     pub fn open(name: &str) -> Result<Self> {
         let shm_name = if name.starts_with('/') {
             name.to_string()
@@ -333,7 +336,7 @@ impl SharedMemory {
             )));
         }
 
-        // First map just the header to get the total size
+        // 首先只映射头部以获取总大小
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -351,7 +354,7 @@ impl SharedMemory {
             return Err(MiniOsError::Shm(format!("mmap header failed: {}", err)));
         }
 
-        // Read header via raw pointer
+        // 通过原始指针读取头部字节并解析
         let mut header_buf = [0u8; SHM_HEADER_SIZE as usize];
         unsafe {
             let src = ptr as *const u8;
@@ -363,7 +366,7 @@ impl SharedMemory {
         }
         let header = ShmHeader::from_bytes(&header_buf)?;
 
-        // Unmap and remap at full size
+        // 取消头部映射并以完整大小重新映射
         unsafe { libc::munmap(ptr, SHM_HEADER_SIZE as libc::size_t) };
 
         let full_ptr = unsafe {
@@ -397,13 +400,14 @@ impl SharedMemory {
         })
     }
 
-    // --- Bitmap Operations ---
+    // --- 位图操作 ---
 
-    /// Check if a page is used
+    /// 检查指定页面是否已被使用（已分配）。
+    /// 如果页面索引超出范围，则视为"已使用"。
     fn is_page_used(&self, page: u32) -> bool {
         let header = self.read_header();
         if page >= header.num_pages {
-            return true; // out of range = "used"
+            return true; // 超出范围视为"已使用"
         }
         let byte_idx = (page / 8) as usize;
         let bit_idx = (page % 8) as u8;
@@ -412,8 +416,10 @@ impl SharedMemory {
         byte & (1 << bit_idx) != 0
     }
 
-    /// Set a page's allocation bit. Uses interior mutability through the
-    /// raw mmap pointer, so `&self` is sufficient.
+    /// 设置页面的分配位。
+    ///
+    /// 通过原始 mmap 指针实现内部可变性，因此 `&self` 共享引用即可满足需求。
+    /// 同时会就地更新头部中的 `free_pages` 计数。
     fn set_page_bit(&self, page: u32, used: bool) {
         let header = self.read_header();
         if page >= header.num_pages {
@@ -431,7 +437,7 @@ impl SharedMemory {
             }
         }
 
-        // Update header free_pages in-place (mmap'd memory)
+        // 就地更新头部中的 free_pages 计数（mmap 内存）
         let header_ptr = self.header_mut_ptr();
         unsafe {
             if used {
@@ -442,25 +448,27 @@ impl SharedMemory {
         }
     }
 
-    /// Get a pointer to the data area of a specific page
+    /// 获取指定页面数据区域的可变原始指针。
+    ///
+    /// 返回的指针指向页面数据区域的起始位置，调用者可直接读写。
     pub fn page_ptr(&self, page: u32) -> *mut u8 {
         let header = self.read_header();
         let offset = header.data_offset + page as u64 * header.page_size as u64;
         unsafe { self.ptr.add(offset as usize) }
     }
 
-    /// Get a const pointer to the data area of a specific page
+    /// 获取指定页面数据区域的不可变原始指针。
     #[allow(dead_code)]
     pub fn page_ptr_const(&self, page: u32) -> *const u8 {
         self.page_ptr(page) as *const u8
     }
 
-    // --- Public Page Allocation API ---
+    // --- 公共页面分配 API ---
 
-    /// Allocate `count` contiguous free pages.
+    /// 分配 `count` 个连续的空闲页面。
     ///
-    /// Returns the starting page number. Blocks (waits) if insufficient
-    /// contiguous free pages are available.
+    /// 返回起始页面编号。使用首次适应（first-fit）算法扫描位图。
+    /// 如果没有足够的连续空闲页面，则会忙等待（每隔 10ms 重试）直到有足够页面为止。
     pub fn alloc_pages(&self, count: u32) -> Result<u32> {
         if count == 0 {
             return Err(MiniOsError::Shm(
@@ -476,7 +484,7 @@ impl SharedMemory {
             )));
         }
 
-        // Simple first-fit with busy-wait for contiguity
+        // 简单的首次适应算法，忙等待连续空闲块
         loop {
             let header = self.read_header();
             let free = header.free_pages;
@@ -489,7 +497,7 @@ impl SharedMemory {
                 continue;
             }
 
-            // First-fit scan for contiguous free pages
+            // 首次适应扫描查找连续空闲页面
             let mut consecutive = 0u32;
             let mut start = 0u32;
 
@@ -500,7 +508,7 @@ impl SharedMemory {
                     }
                     consecutive += 1;
                     if consecutive == count {
-                        // Found contiguous free pages — mark them as used
+                        // 找到连续空闲页面 — 标记为已使用
                         for p in start..start + count {
                             self.set_page_bit(p, true);
                         }
@@ -516,7 +524,7 @@ impl SharedMemory {
                 }
             }
 
-            // No contiguous block found — wait and retry
+            // 未找到连续块 — 等待并重试
             debug!(
                 "No contiguous block of {} pages found ({} free), waiting...",
                 count, header.free_pages
@@ -525,7 +533,10 @@ impl SharedMemory {
         }
     }
 
-    /// Free `count` pages starting from `start_page`
+    /// 释放从 `start_page` 开始的 `count` 个页面。
+    ///
+    /// 将对应页面的位图位清零，并更新空闲页面计数。
+    /// 如果页面范围超出总数则返回错误。
     pub fn free_pages(&self, start_page: u32, count: u32) -> Result<()> {
         let header = self.read_header();
         if start_page + count > header.num_pages {
@@ -550,7 +561,10 @@ impl SharedMemory {
         Ok(())
     }
 
-    /// Write data to a contiguous range of pages
+    /// 将字节数据写入连续范围的页面中。
+    ///
+    /// 从 `start_page` 开始，将 `data` 中的字节复制到共享内存的页面区域。
+    /// 如果数据长度超出共享内存可用空间则返回错误。
     pub fn write_pages(&self, start_page: u32, data: &[u8]) -> Result<()> {
         let header = self.read_header();
         let page_size = header.page_size as usize;
@@ -582,7 +596,10 @@ impl SharedMemory {
         Ok(())
     }
 
-    /// Read data from a contiguous range of pages
+    /// 从连续范围的页面中读取数据。
+    ///
+    /// `count` 指定要读取的页面数量，`expected_size` 是期望的有效数据字节数。
+    /// 返回的字节向量会被截断至 `expected_size` 长度。
     pub fn read_pages(&self, start_page: u32, count: u32, expected_size: u64) -> Result<Vec<u8>> {
         let header = self.read_header();
         let page_size = header.page_size as usize;
@@ -604,28 +621,30 @@ impl SharedMemory {
         Ok(data)
     }
 
-    /// Get the page size
+    /// 获取共享内存的页面大小（字节）。
     pub fn page_size(&self) -> u32 {
         self.read_header().page_size
     }
 
-    /// Get the total number of pages
+    /// 获取共享内存中的页面总数。
     pub fn num_pages(&self) -> u32 {
         self.read_header().num_pages
     }
 
-    /// Get the number of free pages
+    /// 获取当前空闲（未分配）页面的数量。
     pub fn free_page_count(&self) -> u32 {
         self.read_header().free_pages
     }
 
-    /// Get the shared memory name
+    /// 获取共享内存对象的名称。
     #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get shared memory status as a debug string
+    /// 获取共享内存的完整状态信息，以调试字符串形式返回。
+    ///
+    /// 包含名称、页面总数、空闲页面数、页面大小和总大小等信息。
     #[allow(dead_code)]
     pub fn status_string(&self) -> String {
         let header = self.read_header();

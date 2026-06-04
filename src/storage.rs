@@ -7,76 +7,96 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 // ============================================================================
-// Constants
+// 常量定义
 // ============================================================================
 
-/// Magic number for store.odb file identification
+/// store.odb 文件的魔数标识
 const MAGIC: &[u8; 4] = b"MOS\0";
-/// Current file format version
+/// 当前文件格式版本号
 const VERSION: u32 = 1;
-/// Super block is always the first block (4096 bytes)
+/// 超级块始终位于第一个块（4096 字节）
 const SUPER_BLOCK_SIZE: u64 = 4096;
-/// How many blocks the super block occupies
+/// 超级块占用的块数量
 const SUPER_BLOCK_COUNT: u64 = 1;
 
 // ============================================================================
-// Data Structures
+// 数据结构
 // ============================================================================
 
-/// Information about a stored object (returned to clients)
+/// 存储对象的信息（返回给调用方）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectInfo {
+    /// 对象的唯一标识符（UUID 字符串）
     pub uuid: String,
+    /// 对象名称
     pub name: String,
+    /// 对象数据大小（字节数）
     pub size: u64,
+    /// 对象的 MIME 内容类型
     pub content_type: String,
+    /// 对象创建时间（格式化的日期时间字符串）
     pub created_at: String,
+    /// 对象的标签（用于分类和检索）
     pub tags: String,
+    /// 对象占用的数据块数量
     pub block_count: u32,
 }
 
-/// Storage engine status
+/// 存储引擎的运行状态信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStatus {
+    /// 文件系统中的总块数
     pub total_blocks: u64,
+    /// 当前空闲的块数
     pub free_blocks: u64,
+    /// 当前已使用的块数
     pub used_blocks: u64,
+    /// 每个块的大小（字节数）
     pub block_size: u32,
+    /// 当前存储的对象数量
     pub object_count: u64,
+    /// 最大可存储的对象数量
     pub max_objects: u64,
+    /// 元数据区当前已使用的大小（字节数）
     pub metadata_area_size: u64,
+    /// 元数据区的最大容量（字节数）
     pub max_metadata_area_size: u64,
+    /// 存储文件的路径
     pub store_path: String,
+    /// 存储文件的总容量（字节数）
     pub total_capacity: u64,
+    /// 已使用的容量（字节数）
     pub used_capacity: u64,
+    /// 剩余可用的容量（字节数）
     pub free_capacity: u64,
 }
 
 // ============================================================================
-// Super Block (4096 bytes at file offset 0)
+// 超级块（位于文件偏移 0 处的 4096 字节）
 // ============================================================================
 
-/// On-disk layout of the super block (4096 bytes)
+/// 超级块的磁盘布局（共 4096 字节）
 #[derive(Debug, Clone)]
 struct SuperBlock {
-    magic: [u8; 4],            // offset 0
-    version: u32,              // offset 4
-    block_size: u32,           // offset 8
-    total_blocks: u64,         // offset 12
-    free_blocks: u64,          // offset 20
-    object_count: u64,         // offset 28
-    metadata_area_size: u64,   // offset 36
-    max_metadata_area_size: u64, // offset 44
-    bitmap_size: u64,          // offset 52
-    created_at: i64,           // offset 60
-    flags: u32,                // offset 68
-    // padding to 4096
+    magic: [u8; 4],            // 偏移 0：魔数标识
+    version: u32,              // 偏移 4：版本号
+    block_size: u32,           // 偏移 8：块大小
+    total_blocks: u64,         // 偏移 12：总块数
+    free_blocks: u64,          // 偏移 20：空闲块数
+    object_count: u64,         // 偏移 28：对象数量
+    metadata_area_size: u64,   // 偏移 36：元数据区大小
+    max_metadata_area_size: u64, // 偏移 44：元数据区最大容量
+    bitmap_size: u64,          // 偏移 52：位图大小
+    created_at: i64,           // 偏移 60：创建时间戳
+    flags: u32,                // 偏移 68：标志位
+    // 填充至 4096 字节
 }
 
 impl SuperBlock {
+    /// 创建一个新的超级块实例
     fn new(block_size: u32, total_blocks: u64, max_metadata_area_size: u64) -> Self {
         let bitmap_size = (total_blocks + 7) / 8;
-        // Align bitmap to 8-byte boundary
+        // 将位图对齐到 8 字节边界
         let bitmap_size = ((bitmap_size + 7) / 8) * 8;
         Self {
             magic: *MAGIC,
@@ -93,59 +113,59 @@ impl SuperBlock {
         }
     }
 
-    /// Serialize super block to raw bytes (4096 bytes)
+    /// 将超级块序列化为原始字节数组（4096 字节）
     fn to_bytes(&self) -> [u8; SUPER_BLOCK_SIZE as usize] {
         let mut buf = [0u8; SUPER_BLOCK_SIZE as usize];
         let mut offset = 0;
 
-        // magic (4 bytes)
+        // 魔数（4 字节）
         buf[offset..offset + 4].copy_from_slice(&self.magic);
         offset += 4;
 
-        // version (4 bytes, little-endian)
+        // 版本号（4 字节，小端序）
         buf[offset..offset + 4].copy_from_slice(&self.version.to_le_bytes());
         offset += 4;
 
-        // block_size (4 bytes)
+        // 块大小（4 字节）
         buf[offset..offset + 4].copy_from_slice(&self.block_size.to_le_bytes());
         offset += 4;
 
-        // total_blocks (8 bytes)
+        // 总块数（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.total_blocks.to_le_bytes());
         offset += 8;
 
-        // free_blocks (8 bytes)
+        // 空闲块数（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.free_blocks.to_le_bytes());
         offset += 8;
 
-        // object_count (8 bytes)
+        // 对象数量（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.object_count.to_le_bytes());
         offset += 8;
 
-        // metadata_area_size (8 bytes)
+        // 元数据区大小（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.metadata_area_size.to_le_bytes());
         offset += 8;
 
-        // max_metadata_area_size (8 bytes)
+        // 元数据区最大容量（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.max_metadata_area_size.to_le_bytes());
         offset += 8;
 
-        // bitmap_size (8 bytes)
+        // 位图大小（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.bitmap_size.to_le_bytes());
         offset += 8;
 
-        // created_at (8 bytes)
+        // 创建时间戳（8 字节）
         buf[offset..offset + 8].copy_from_slice(&self.created_at.to_le_bytes());
         offset += 8;
 
-        // flags (4 bytes)
+        // 标志位（4 字节）
         buf[offset..offset + 4].copy_from_slice(&self.flags.to_le_bytes());
-        // offset += 4; // not needed, rest is padding
+        // offset += 4; // 不需要，剩余部分为填充
 
         buf
     }
 
-    /// Deserialize super block from raw bytes
+    /// 从原始字节数组反序列化出超级块
     fn from_bytes(buf: &[u8; SUPER_BLOCK_SIZE as usize]) -> Result<Self> {
         let mut offset = 0;
 
@@ -155,7 +175,7 @@ impl SuperBlock {
 
         if &magic != MAGIC {
             return Err(MiniOsError::Storage(
-                "Invalid magic number: not a MiniOS store file".to_string(),
+                "无效的魔数：不是 MiniOS 存储文件".to_string(),
             ));
         }
 
@@ -166,7 +186,7 @@ impl SuperBlock {
 
         if version != VERSION {
             return Err(MiniOsError::Storage(format!(
-                "Unsupported version: {} (expected {})",
+                "不支持的版本：{}（期望版本 {}）",
                 version, VERSION
             )));
         }
@@ -239,29 +259,37 @@ impl SuperBlock {
 }
 
 // ============================================================================
-// Metadata Entry (variable-length, stored in metadata area)
+// 元数据条目（变长，存储在元数据区中）
 // ============================================================================
 
-/// On-disk metadata entry flags
+/// 磁盘上元数据条目的删除标记位
 const META_FLAG_DELETED: u8 = 0x01;
 
-/// A metadata entry in the metadata area
+/// 元数据区中的一个元数据条目
 #[derive(Debug, Clone)]
 struct MetadataEntry {
+    /// 对象的唯一标识符（UUID）
     uuid: uuid::Uuid,
+    /// 标志位（如删除标记等）
     flags: u8,
+    /// 对象名称
     name: String,
+    /// 对象数据大小（字节数）
     size: u64,
+    /// 对象的 MIME 内容类型
     content_type: String,
+    /// 对象创建时间（Unix 时间戳）
     created_at: i64,
+    /// 对象标签
     tags: String,
+    /// 数据块指针列表（指向各数据块的块号）
     block_pointers: Vec<u64>,
-    /// Total on-disk size of this entry (including this field)
+    /// 本条目的磁盘总大小（包含此字段自身）
     entry_size: u32,
 }
 
 impl MetadataEntry {
-    /// Create a new metadata entry
+    /// 创建一个新的元数据条目
     fn new(
         name: &str,
         size: u64,
@@ -278,11 +306,11 @@ impl MetadataEntry {
             created_at: chrono::Utc::now().timestamp(),
             tags: tags.to_string(),
             block_pointers,
-            entry_size: 0, // calculated on serialization
+            entry_size: 0, // 序列化时计算
         }
     }
 
-    /// Calculate the on-disk size of this entry
+    /// 计算本条目的磁盘大小
     fn calculate_entry_size(&self) -> u32 {
         // uuid(16) + flags(1) + name_len(2) + name + size(8) +
         // content_type_len(2) + content_type + created_at(8) +
@@ -304,136 +332,136 @@ impl MetadataEntry {
         size
     }
 
-    /// Serialize to bytes
+    /// 将元数据条目序列化为字节数组
     fn to_bytes(&self) -> Vec<u8> {
         let entry_size = self.calculate_entry_size();
         let mut buf = Vec::with_capacity(entry_size as usize);
 
-        // uuid (16 bytes)
+        // uuid（16 字节）
         buf.extend_from_slice(self.uuid.as_bytes());
 
-        // flags (1 byte)
+        // 标志位（1 字节）
         buf.push(self.flags);
 
-        // name_len (2 bytes, LE)
+        // 名称长度（2 字节，小端序）
         buf.extend_from_slice(&(self.name.len() as u16).to_le_bytes());
 
-        // name (variable)
+        // 名称（变长）
         buf.extend_from_slice(self.name.as_bytes());
 
-        // size (8 bytes, LE)
+        // 数据大小（8 字节，小端序）
         buf.extend_from_slice(&self.size.to_le_bytes());
 
-        // content_type_len (2 bytes, LE)
+        // 内容类型长度（2 字节，小端序）
         buf.extend_from_slice(&(self.content_type.len() as u16).to_le_bytes());
 
-        // content_type (variable)
+        // 内容类型（变长）
         buf.extend_from_slice(self.content_type.as_bytes());
 
-        // created_at (8 bytes, LE)
+        // 创建时间（8 字节，小端序）
         buf.extend_from_slice(&self.created_at.to_le_bytes());
 
-        // tags_len (2 bytes, LE)
+        // 标签长度（2 字节，小端序）
         buf.extend_from_slice(&(self.tags.len() as u16).to_le_bytes());
 
-        // tags (variable)
+        // 标签（变长）
         buf.extend_from_slice(self.tags.as_bytes());
 
-        // block_count (4 bytes, LE)
+        // 块数量（4 字节，小端序）
         buf.extend_from_slice(&(self.block_pointers.len() as u32).to_le_bytes());
 
-        // block_pointers (8 bytes each, LE)
+        // 块指针列表（每个 8 字节，小端序）
         for &ptr in &self.block_pointers {
             buf.extend_from_slice(&ptr.to_le_bytes());
         }
 
-        // entry_size (4 bytes, LE)
+        // 条目大小（4 字节，小端序）
         buf.extend_from_slice(&entry_size.to_le_bytes());
 
         buf
     }
 
-    /// Deserialize from bytes, returns (entry, bytes_consumed)
+    /// 从字节数组反序列化元数据条目，返回 (条目, 消耗的字节数)
     fn from_bytes(data: &[u8]) -> Result<(Self, u32)> {
         if data.len() < 16 + 1 + 2 + 8 + 2 + 8 + 2 + 4 + 4 {
             return Err(MiniOsError::Storage(
-                "Metadata entry too short".to_string(),
+                "元数据条目太短".to_string(),
             ));
         }
 
         let mut offset = 0;
 
-        // uuid (16 bytes)
+        // uuid（16 字节）
         let uuid = uuid::Uuid::from_slice(&data[offset..offset + 16]).map_err(|e| {
-            MiniOsError::Storage(format!("Invalid UUID in metadata: {}", e))
+            MiniOsError::Storage(format!("元数据中的 UUID 无效：{}", e))
         })?;
         offset += 16;
 
-        // flags (1 byte)
+        // 标志位（1 字节）
         let flags = data[offset];
         offset += 1;
 
-        // name_len (2 bytes, LE)
+        // 名称长度（2 字节，小端序）
         let name_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
 
-        // name (variable)
+        // 名称（变长）
         if offset + name_len > data.len() {
-            return Err(MiniOsError::Storage("Corrupt metadata: name".to_string()));
+            return Err(MiniOsError::Storage("损坏的元数据：名称字段".to_string()));
         }
         let name = std::str::from_utf8(&data[offset..offset + name_len])?.to_string();
         offset += name_len;
 
-        // size (8 bytes, LE)
+        // 数据大小（8 字节，小端序）
         let size = u64::from_le_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
             data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
         ]);
         offset += 8;
 
-        // content_type_len (2 bytes, LE)
+        // 内容类型长度（2 字节，小端序）
         let ct_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
 
-        // content_type (variable)
+        // 内容类型（变长）
         if offset + ct_len > data.len() {
             return Err(MiniOsError::Storage(
-                "Corrupt metadata: content_type".to_string(),
+                "损坏的元数据：内容类型字段".to_string(),
             ));
         }
         let content_type = std::str::from_utf8(&data[offset..offset + ct_len])?.to_string();
         offset += ct_len;
 
-        // created_at (8 bytes, LE)
+        // 创建时间（8 字节，小端序）
         let created_at = i64::from_le_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
             data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
         ]);
         offset += 8;
 
-        // tags_len (2 bytes, LE)
+        // 标签长度（2 字节，小端序）
         let tags_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
 
-        // tags (variable)
+        // 标签（变长）
         if offset + tags_len > data.len() {
-            return Err(MiniOsError::Storage("Corrupt metadata: tags".to_string()));
+            return Err(MiniOsError::Storage("损坏的元数据：标签字段".to_string()));
         }
         let tags = std::str::from_utf8(&data[offset..offset + tags_len])?.to_string();
         offset += tags_len;
 
-        // block_count (4 bytes, LE)
+        // 块数量（4 字节，小端序）
         let block_count = u32::from_le_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
         ]) as usize;
         offset += 4;
 
-        // block_pointers (8 bytes each, LE)
+        // 块指针列表（每个 8 字节，小端序）
         let mut block_pointers = Vec::with_capacity(block_count);
         for _ in 0..block_count {
             if offset + 8 > data.len() {
                 return Err(MiniOsError::Storage(
-                    "Corrupt metadata: block_pointers".to_string(),
+                    "损坏的元数据：块指针列表字段".to_string(),
                 ));
             }
             let ptr = u64::from_le_bytes([
@@ -444,7 +472,7 @@ impl MetadataEntry {
             offset += 8;
         }
 
-        // entry_size (4 bytes, LE)
+        // 条目大小（4 字节，小端序）
         let entry_size = u32::from_le_bytes([
             data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
         ]);
@@ -465,7 +493,7 @@ impl MetadataEntry {
         ))
     }
 
-    /// Convert to ObjectInfo for external API
+    /// 将元数据条目转换为 ObjectInfo，供外部 API 使用
     fn to_object_info(&self) -> ObjectInfo {
         ObjectInfo {
             uuid: self.uuid.to_string(),
@@ -486,54 +514,66 @@ impl MetadataEntry {
 }
 
 // ============================================================================
-// Object Storage Engine
+// 对象存储引擎
 // ============================================================================
 
-/// The main object storage engine managing the store.odb file
+/// 对象存储引擎主结构体，负责管理 store.odb 文件
 pub struct ObjectStorage {
+    /// 底层存储文件句柄
     file: File,
+    /// 文件的超级块（包含文件系统的全局元信息）
     super_block: SuperBlock,
-    /// In-memory copy of the free block bitmap
+    /// 空闲块位图的内存副本（每个 bit 表示一个块是否已分配）
     bitmap: Vec<u8>,
+    /// 脏标记：标记内存中的超级块和位图是否已修改但尚未写入磁盘
     dirty: bool,
 }
 
 impl ObjectStorage {
-    // --- Offsets ---
+    // --- 偏移量计算 ---
 
-    /// Offset where the bitmap starts
+    /// 计算位图在文件中的起始偏移量
     fn bitmap_offset() -> u64 {
         SUPER_BLOCK_SIZE
     }
 
-    /// Offset where the metadata area starts
+    /// 计算元数据区在文件中的起始偏移量
     fn metadata_offset(&self) -> u64 {
         SUPER_BLOCK_SIZE + self.super_block.bitmap_size
     }
 
-    /// Offset where the data area starts
+    /// 计算数据区在文件中的起始偏移量
     fn data_offset(&self) -> u64 {
         SUPER_BLOCK_SIZE
             + self.super_block.bitmap_size
             + self.super_block.max_metadata_area_size
     }
 
-    /// Offset of a specific data block
+    /// 计算指定数据块在文件中的偏移量
     fn block_offset(&self, block_num: u64) -> u64 {
         self.data_offset() + block_num * self.super_block.block_size as u64
     }
 
-    // --- Public API ---
+    // --- 公共 API ---
 
-    /// Open an existing store file or create a new one
+    /// 打开一个已有的存储文件，若文件不存在则创建一个新的。
+    ///
+    /// # 参数
+    /// * `path` - 存储文件的路径
+    /// * `block_size` - 每个数据块的大小（字节数）
+    /// * `total_blocks` - 文件系统中数据块的总数
+    /// * `max_objects` - 最大可存储的对象数量
+    ///
+    /// # 返回值
+    /// 成功时返回 `ObjectStorage` 实例，失败时返回错误。
     pub fn open(
         path: &str,
         block_size: u32,
         total_blocks: u64,
         max_objects: u64,
     ) -> Result<Self> {
-        // Estimate max metadata area size based on max objects
-        // Average entry size ~200 bytes
+        // 根据最大对象数估算元数据区的最大大小
+        // 平均每个条目约 200 字节
         let max_metadata_area_size = max_objects * 256;
 
         let path = Path::new(path);
@@ -546,22 +586,22 @@ impl ObjectStorage {
             .open(path)?;
 
         if exists && file.metadata()?.len() > 0 {
-            // Read existing super block
+            // 读取已有的超级块
             let mut sb_buf = [0u8; SUPER_BLOCK_SIZE as usize];
             let mut f = &file;
             f.seek(SeekFrom::Start(0))?;
             f.read_exact(&mut sb_buf)?;
             let super_block = SuperBlock::from_bytes(&sb_buf)?;
 
-            // Validate parameters match
+            // 验证参数是否匹配
             if super_block.block_size != block_size {
                 return Err(MiniOsError::Storage(format!(
-                    "Block size mismatch: file has {}, requested {}",
+                    "块大小不匹配：文件中为 {}，请求为 {}",
                     super_block.block_size, block_size
                 )));
             }
 
-            // Read bitmap into memory
+            // 将位图读入内存
             let mut bitmap = vec![0u8; super_block.bitmap_size as usize];
             let mut f = &file;
             f.seek(SeekFrom::Start(Self::bitmap_offset()))?;
@@ -574,7 +614,7 @@ impl ObjectStorage {
                 dirty: false,
             })
         } else {
-            // Create new store file
+            // 创建新的存储文件
             let super_block = SuperBlock::new(block_size, total_blocks, max_metadata_area_size);
             let bitmap = vec![0u8; super_block.bitmap_size as usize];
 
@@ -585,7 +625,7 @@ impl ObjectStorage {
                 dirty: true,
             };
 
-            // Initialize the file layout
+            // 初始化文件布局
             storage.init_file()?;
             storage.flush()?;
 
@@ -593,22 +633,22 @@ impl ObjectStorage {
         }
     }
 
-    /// Initialize a new store file (write super block, bitmap, empty metadata area)
+    /// 初始化一个新的存储文件（写入超级块、位图和空的元数据区）
     fn init_file(&mut self) -> Result<()> {
-        // Calculate total file size
+        // 计算文件总大小
         let file_size = self.data_offset()
             + self.super_block.total_blocks * self.super_block.block_size as u64;
 
-        // Truncate (or pre-allocate) the file
+        // 截断（或预分配）文件到指定大小
         self.file.set_len(file_size)?;
 
-        // Write super block
+        // 写入超级块
         let sb_bytes = self.super_block.to_bytes();
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&sb_bytes)?;
 
-        // Write initial bitmap (all zeros = all free, except super block area)
-        // Mark blocks used by super block, bitmap, and metadata area as used
+        // 写入初始位图（全零 = 全部空闲，但超级块区域除外）
+        // 将超级块、位图和元数据区占用的块标记为已使用
         let reserved_blocks =
             (self.data_offset() + self.super_block.block_size as u64 - 1)
                 / self.super_block.block_size as u64;
@@ -616,7 +656,7 @@ impl ObjectStorage {
             self.set_bitmap_bit(i, true)?;
         }
 
-        // Write bitmap
+        // 写入位图
         self.file.seek(SeekFrom::Start(Self::bitmap_offset()))?;
         self.file.write_all(&self.bitmap)?;
 
@@ -626,8 +666,18 @@ impl ObjectStorage {
         Ok(())
     }
 
-    /// Put an object into the store
-    /// Returns the object info (including generated UUID)
+    /// 将一个对象存入存储系统。
+    ///
+    /// # 参数
+    /// * `name` - 对象名称（不可重复）
+    /// * `data` - 对象的原始字节数据
+    /// * `content_type` - 对象的 MIME 内容类型
+    /// * `tags` - 对象的标签字符串
+    ///
+    /// # 返回值
+    /// 成功时返回包含生成的 UUID 等信息的 `ObjectInfo`，失败时返回错误。
+    /// 如果同名对象已存在，则返回 `AlreadyExists` 错误。
+    /// 如果存储空间不足，则返回 `NoSpace` 错误。
     pub fn put(
         &mut self,
         name: &str,
@@ -635,10 +685,10 @@ impl ObjectStorage {
         content_type: &str,
         tags: &str,
     ) -> Result<ObjectInfo> {
-        // Check for duplicate name
+        // 检查是否有同名对象
         if self.find_by_name(name).is_some() {
             return Err(MiniOsError::AlreadyExists(format!(
-                "Object with name '{}' already exists",
+                "名为 '{}' 的对象已存在",
                 name
             )));
         }
@@ -646,20 +696,20 @@ impl ObjectStorage {
         let data_len = data.len() as u64;
         let block_size = self.super_block.block_size as u64;
         let blocks_needed = if data_len == 0 {
-            1 // Store empty objects in 1 block
+            1 // 空对象也占用 1 个块
         } else {
             (data_len + block_size - 1) / block_size
         };
 
-        // Check free space
+        // 检查空闲空间
         if self.super_block.free_blocks < blocks_needed {
             return Err(MiniOsError::NoSpace);
         }
 
-        // Allocate blocks
+        // 分配数据块
         let block_pointers = self.allocate_blocks(blocks_needed)?;
 
-        // Write data to allocated blocks
+        // 将数据写入已分配的各数据块
         for (i, &block_num) in block_pointers.iter().enumerate() {
             let offset = self.block_offset(block_num);
             let start = i * block_size as usize;
@@ -668,38 +718,44 @@ impl ObjectStorage {
 
             self.file.seek(SeekFrom::Start(offset))?;
 
-            // Always zero-fill the full block first, then write the data
-            // chunk. This prevents residual data from previously freed
-            // blocks from leaking into reads.
+            // 先写数据块，然后将块中剩余部分填充零。
+            // 这样做可以防止之前释放的块中的残留数据泄露到读取操作中。
             let padding_len = block_size as usize - chunk.len();
             self.file.write_all(chunk)?;
             if padding_len > 0 {
-                // Zero the remainder efficiently in one write
+                // 用一次写入高效地将剩余部分清零
                 let zeros = vec![0u8; padding_len];
                 self.file.write_all(&zeros)?;
             }
         }
 
-        // Create metadata entry
+        // 创建元数据条目
         let entry = MetadataEntry::new(name, data_len, content_type, tags, block_pointers);
         let info = entry.to_object_info();
         let entry_bytes = entry.to_bytes();
 
-        // Write metadata entry (try to reuse deleted entry space first)
+        // 写入元数据条目（优先尝试复用已删除条目的空间）
         self.write_metadata_entry(&entry_bytes)?;
 
-        // Update super block
+        // 更新超级块
         self.super_block.object_count += 1;
         self.dirty = true;
 
-        // Flush to ensure subsequent reads see the latest state
+        // 刷新到磁盘，确保后续的读取操作能看到最新状态
         self.flush()?;
 
         Ok(info)
     }
 
-    /// Find object metadata by UUID or name WITHOUT reading data blocks.
-    /// Returns ObjectInfo only; use `get()` to also read the data.
+    /// 根据 UUID 或名称查找对象的元信息，但不读取数据块。
+    ///
+    /// 返回 `ObjectInfo`；如需同时读取数据，请使用 `get()` 方法。
+    ///
+    /// # 参数
+    /// * `key` - 对象的 UUID 字符串或名称
+    ///
+    /// # 返回值
+    /// 成功时返回 `ObjectInfo`，未找到时返回 `NotFound` 错误。
     pub fn find_info(&mut self, key: &str) -> Result<ObjectInfo> {
         let entry = self
             .find_entry(key)?
@@ -711,19 +767,27 @@ impl ObjectStorage {
         Ok(entry.to_object_info())
     }
 
-    /// Get an object from the store by UUID or name
-    /// Returns (ObjectInfo, data_bytes)
+    /// 根据 UUID 或名称从存储中读取对象。
+    ///
+    /// 同时返回对象的元信息 (`ObjectInfo`) 和原始数据字节。
+    ///
+    /// # 参数
+    /// * `key` - 对象的 UUID 字符串或名称
+    ///
+    /// # 返回值
+    /// 成功时返回 `(ObjectInfo, Vec<u8>)` 元组，
+    /// 未找到时返回 `NotFound` 错误。
     pub fn get(&mut self, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
-        // already &mut self — correct
+        // 已经使用了 &mut self —— 正确
         let entry = self
             .find_entry(key)?
-            .ok_or_else(|| MiniOsError::NotFound(format!("Object not found: {}", key)))?;
+            .ok_or_else(|| MiniOsError::NotFound(format!("未找到对象：{}", key)))?;
 
         if entry.flags & META_FLAG_DELETED != 0 {
-            return Err(MiniOsError::NotFound(format!("Object not found: {}", key)));
+            return Err(MiniOsError::NotFound(format!("未找到对象：{}", key)));
         }
 
-        // Read data from blocks
+        // 从数据块中读取数据
         let block_size = self.super_block.block_size as usize;
         let mut data = Vec::with_capacity(entry.size as usize);
 
@@ -736,45 +800,56 @@ impl ObjectStorage {
             data.extend_from_slice(&chunk);
         }
 
-        // Trim to actual size
+        // 将数据截断到实际大小
         data.truncate(entry.size as usize);
 
         Ok((entry.to_object_info(), data))
     }
 
-    /// Delete an object by UUID or name
+    /// 根据 UUID 或名称删除一个对象。
+    ///
+    /// 删除操作会将对象的数据块标记为空闲，并将元数据条目标记为已删除。
+    ///
+    /// # 参数
+    /// * `key` - 要删除的对象的 UUID 字符串或名称
+    ///
+    /// # 返回值
+    /// 成功时返回 `Ok(())`，未找到时返回 `NotFound` 错误。
     pub fn delete(&mut self, key: &str) -> Result<()> {
-        // Find the entry offset in the metadata area
+        // 在元数据区中查找条目的偏移量
         let (entry, entry_offset) = self
             .find_entry_with_offset(key)?
-            .ok_or_else(|| MiniOsError::NotFound(format!("Object not found: {}", key)))?;
+            .ok_or_else(|| MiniOsError::NotFound(format!("未找到对象：{}", key)))?;
 
         if entry.flags & META_FLAG_DELETED != 0 {
-            return Err(MiniOsError::NotFound(format!("Object not found: {}", key)));
+            return Err(MiniOsError::NotFound(format!("未找到对象：{}", key)));
         }
 
-        // Free data blocks
+        // 释放数据块
         for &block_num in &entry.block_pointers {
             self.set_bitmap_bit(block_num, false)?;
         }
         self.super_block.free_blocks += entry.block_pointers.len() as u64;
 
-        // Mark metadata entry as deleted
-        let flags_offset = entry_offset + 16; // uuid is 16 bytes, flags follows
+        // 将元数据条目标记为已删除
+        let flags_offset = entry_offset + 16; // uuid 占 16 字节，flags 紧跟其后
         self.file.seek(SeekFrom::Start(flags_offset))?;
         self.file.write_all(&[META_FLAG_DELETED])?;
 
-        // Update super block
+        // 更新超级块
         self.super_block.object_count -= 1;
         self.dirty = true;
 
-        // Flush to ensure subsequent reads see the latest state
+        // 刷新到磁盘，确保后续的读取操作能看到最新状态
         self.flush()?;
 
         Ok(())
     }
 
-    /// List all objects
+    /// 列出存储中的所有对象。
+    ///
+    /// # 返回值
+    /// 成功时返回所有未删除对象的 `ObjectInfo` 列表。
     pub fn list(&mut self) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
         let entries = self.scan_all_entries()?;
@@ -786,7 +861,11 @@ impl ObjectStorage {
         Ok(objects)
     }
 
-    /// Get storage status
+    /// 获取存储系统的当前运行状态。
+    ///
+    /// # 返回值
+    /// 返回一个 `StorageStatus` 结构体，包含块使用情况、
+    /// 容量信息和对象数量等统计信息。
     pub fn status(&self) -> StorageStatus {
         let block_size = self.super_block.block_size as u64;
         let total_capacity = self.super_block.total_blocks * block_size;
@@ -803,22 +882,27 @@ impl ObjectStorage {
             max_objects: self.super_block.max_metadata_area_size / 256,
             metadata_area_size: self.super_block.metadata_area_size,
             max_metadata_area_size: self.super_block.max_metadata_area_size,
-            store_path: String::new(), // filled in by caller
+            store_path: String::new(), // 由调用方填充
             total_capacity,
             used_capacity,
             free_capacity,
         }
     }
 
-    /// Flush changes to disk
+    /// 将所有已修改的数据刷新到磁盘。
+    ///
+    /// 包括超级块和空闲块位图的持久化写入。
+    ///
+    /// # 返回值
+    /// 成功时返回 `Ok(())`，发生 I/O 错误时返回错误。
     pub fn flush(&mut self) -> Result<()> {
         if self.dirty {
-            // Write super block
+            // 写入超级块
             let sb_bytes = self.super_block.to_bytes();
             self.file.seek(SeekFrom::Start(0))?;
             self.file.write_all(&sb_bytes)?;
 
-            // Write bitmap
+            // 写入位图
             self.file.seek(SeekFrom::Start(Self::bitmap_offset()))?;
             self.file.write_all(&self.bitmap)?;
 
@@ -828,14 +912,14 @@ impl ObjectStorage {
         Ok(())
     }
 
-    // --- Internal Helpers ---
+    // --- 内部辅助方法 ---
 
-    /// Set a bit in the free block bitmap
-    /// `used = true` means the block is allocated
+    /// 设置空闲块位图中的某一位。
+    /// `used = true` 表示该块已被分配。
     fn set_bitmap_bit(&mut self, block_num: u64, used: bool) -> Result<()> {
         if block_num >= self.super_block.total_blocks {
             return Err(MiniOsError::Storage(format!(
-                "Block number {} out of range (max {})",
+                "块号 {} 超出范围（最大值为 {}）",
                 block_num, self.super_block.total_blocks
             )));
         }
@@ -849,7 +933,7 @@ impl ObjectStorage {
             self.bitmap[byte_idx] &= !(1 << bit_idx);
         }
 
-        // Also write to file immediately for consistency
+        // 同时立即写入文件以保持一致性
         let offset = Self::bitmap_offset() + byte_idx as u64;
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(&[self.bitmap[byte_idx]])?;
@@ -857,17 +941,17 @@ impl ObjectStorage {
         Ok(())
     }
 
-    /// Check if a block is used
+    /// 检查指定块是否已被使用
     fn is_block_used(&self, block_num: u64) -> bool {
         if block_num >= self.super_block.total_blocks {
-            return true; // out of range = "used"
+            return true; // 超出范围视为"已使用"
         }
         let byte_idx = (block_num / 8) as usize;
         let bit_idx = (block_num % 8) as u8;
         self.bitmap[byte_idx] & (1 << bit_idx) != 0
     }
 
-    /// Allocate `count` contiguous free blocks, returns block numbers
+    /// 分配 `count` 个连续的空闲块，并返回块号列表
     fn allocate_blocks(&mut self, count: u64) -> Result<Vec<u64>> {
         let mut allocated = Vec::with_capacity(count as usize);
         let total = self.super_block.total_blocks;
@@ -882,7 +966,7 @@ impl ObjectStorage {
                 }
                 consecutive += 1;
                 if consecutive == count {
-                    // Found enough contiguous blocks
+                    // 找到了足够的连续块
                     for b in start..start + count {
                         self.set_bitmap_bit(b, true)?;
                         allocated.push(b);
@@ -896,8 +980,8 @@ impl ObjectStorage {
             }
         }
 
-        // Not enough contiguous blocks, try non-contiguous allocation
-        // (fallback: just find any free blocks)
+        // 没有足够的连续块，尝试非连续分配
+        // （回退策略：任意找空闲块即可）
         allocated.clear();
         for block_num in 0..total {
             if !self.is_block_used(block_num) {
@@ -911,19 +995,19 @@ impl ObjectStorage {
             }
         }
 
-        // Shouldn't reach here if we checked free_blocks
+        // 如果已检查过空闲块数，理论上不会到达这里
         Err(MiniOsError::NoSpace)
     }
 
-    /// Find an object entry by UUID or name (tries UUID first, then name)
+    /// 根据 UUID 或名称查找对象条目（先尝试 UUID 匹配，再尝试名称匹配）
     fn find_entry(&mut self, key: &str) -> Result<Option<MetadataEntry>> {
         self.find_entry_with_offset(key)
             .map(|opt| opt.map(|(entry, _)| entry))
     }
 
-    /// Find an object entry by key, returning (entry, file_offset_of_entry)
+    /// 根据 key 查找对象条目，返回 (条目, 文件中的偏移量)
     fn find_entry_with_offset(&mut self, key: &str) -> Result<Option<(MetadataEntry, u64)>> {
-        // Try parsing as UUID first
+        // 优先尝试按 UUID 解析
         let uuid_key = uuid::Uuid::parse_str(key).ok();
 
         let entries = self.scan_all_entries_with_offsets()?;
@@ -943,7 +1027,7 @@ impl ObjectStorage {
         Ok(None)
     }
 
-    /// Find an object by name only (returns entry if exists and not deleted)
+    /// 仅按名称查找对象（若条目存在且未被删除则返回）
     fn find_by_name(&mut self, name: &str) -> Option<MetadataEntry> {
         let entries = self.scan_all_entries().ok()?;
         entries.into_iter().find(|e| {
@@ -951,13 +1035,13 @@ impl ObjectStorage {
         })
     }
 
-    /// Scan all metadata entries (without offsets)
+    /// 扫描所有元数据条目（不含偏移量）
     fn scan_all_entries(&mut self) -> Result<Vec<MetadataEntry>> {
         self.scan_all_entries_with_offsets()
             .map(|v| v.into_iter().map(|(e, _)| e).collect())
     }
 
-    /// Scan all metadata entries with their file offsets
+    /// 扫描所有元数据条目及其在文件中的偏移量
     fn scan_all_entries_with_offsets(&mut self) -> Result<Vec<(MetadataEntry, u64)>> {
         let mut entries = Vec::new();
         let metadata_offset = self.metadata_offset();
@@ -967,7 +1051,7 @@ impl ObjectStorage {
             return Ok(entries);
         }
 
-        // Read the entire metadata area
+        // 读取整个元数据区
         let mut buf = vec![0u8; metadata_size as usize];
         self.file.seek(SeekFrom::Start(metadata_offset))?;
         self.file.read_exact(&mut buf)?;
@@ -975,7 +1059,7 @@ impl ObjectStorage {
         let mut offset = 0u64;
         while offset < metadata_size {
             let slice = &buf[offset as usize..];
-            // Try to parse an entry; if it fails, we're at the end or data is corrupt
+            // 尝试解析一个条目；若失败，说明已到达末尾或数据已损坏
             match MetadataEntry::from_bytes(slice) {
                 Ok((entry, entry_size)) => {
                     let file_offset = metadata_offset + offset;
@@ -983,7 +1067,7 @@ impl ObjectStorage {
                     offset += entry_size as u64;
                 }
                 Err(_) => {
-                    // Could be padding/end of metadata; stop scanning
+                    // 可能是填充数据或是元数据末尾；停止扫描
                     break;
                 }
             }
@@ -992,31 +1076,29 @@ impl ObjectStorage {
         Ok(entries)
     }
 
-    /// Write a metadata entry to the metadata area.
+    /// 将一个元数据条目写入元数据区。
     ///
-    /// Always appends at the end of the metadata area. Deleted entries
-    /// are left in place and skipped during scan (their flags mark them).
-    /// Reusing deleted slots is deliberately avoided because it risks
-    /// leaving trailing garbage bytes from the old entry when the new
-    /// entry is smaller, which would break the sequential scan.
+    /// 始终追加到元数据区的末尾。已删除的条目保留在原位，
+    /// 扫描时通过其标志位跳过。故意不复用已删除条目的空间，
+    /// 因为当新条目更小时，旧条目的残留垃圾字节可能会破坏顺序扫描的正确性。
     fn write_metadata_entry(&mut self, entry_bytes: &[u8]) -> Result<()> {
         let metadata_offset = self.metadata_offset();
         let entry_size = entry_bytes.len() as u64;
 
-        // Always append at end of metadata area
+        // 始终追加到元数据区末尾
         let write_offset = metadata_offset + self.super_block.metadata_area_size;
 
-        // Check if we have space
+        // 检查是否有足够空间
         if self.super_block.metadata_area_size + entry_size
             > self.super_block.max_metadata_area_size
         {
             return Err(MiniOsError::Storage(
-                "Metadata area full: cannot store more objects".to_string(),
+                "元数据区已满：无法存储更多对象".to_string(),
             ));
         }
         self.super_block.metadata_area_size += entry_size;
 
-        // Write the entry
+        // 写入条目
         self.file.seek(SeekFrom::Start(write_offset))?;
         self.file.write_all(entry_bytes)?;
         self.dirty = true;
@@ -1032,12 +1114,29 @@ impl Drop for ObjectStorage {
 }
 
 // ============================================================================
-// Thread-safe wrapper
+// 线程安全的包装器
 // ============================================================================
 
+/// 线程安全的共享存储句柄类型别名
+///
+/// 通过 `Arc<Mutex<>>` 包装 `ObjectStorage`，
+/// 允许多个线程安全地共享和访问同一个存储实例。
 pub type SharedStorage = Arc<Mutex<ObjectStorage>>;
 
-/// Create a new thread-safe storage instance
+/// 创建一个新的线程安全的存储实例。
+///
+/// 该函数会打开（或创建）指定路径的存储文件，
+/// 并将其包装在 `Arc<Mutex<ObjectStorage>>` 中以支持多线程访问。
+///
+/// # 参数
+/// * `path` - 存储文件的路径
+/// * `block_size` - 每个数据块的大小（字节数）
+/// * `total_blocks` - 文件系统中数据块的总数
+/// * `max_objects` - 最大可存储的对象数量
+///
+/// # 返回值
+/// 成功时返回一个线程安全的 `SharedStorage` 句柄，
+/// 失败时返回错误。
 pub fn create_storage(
     path: &str,
     block_size: u32,
