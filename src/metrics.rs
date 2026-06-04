@@ -144,6 +144,8 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
             handle_web_resize(&mut stream, &body_bytes, cache),
         ("GET", "/api/benchmark") =>
             handle_web_benchmark(&mut stream, storage, cache),
+        ("GET", "/api/search") =>
+            handle_web_search(&mut stream, first_line, storage),
         _ => respond(&mut stream, "404 Not Found", "text/plain", "404\n"),
     }
 }
@@ -478,6 +480,74 @@ fn handle_web_resize(stream: &mut TcpStream, body: &[u8], cache: &Arc<ObjectCach
     }
 }
 
+fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage) {
+    let name = get_query_param(first_line, "name");
+    let tag = get_query_param(first_line, "tag");
+    let ctype = get_query_param(first_line, "type");
+    let after = get_query_param(first_line, "after");
+    let before = get_query_param(first_line, "before");
+
+    let all = {
+        let mut st = storage.lock().unwrap();
+        st.list().unwrap_or_default()
+    };
+
+    let filtered: Vec<_> = all.into_iter().filter(|o| {
+        if let Some(ref n) = name {
+            if !o.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+        }
+        if let Some(ref t) = tag {
+            if !o.tags.to_lowercase().contains(&t.to_lowercase()) { return false; }
+        }
+        if let Some(ref ct) = ctype {
+            if !o.content_type.to_lowercase().contains(&ct.to_lowercase()) { return false; }
+        }
+        // after/before — simple string prefix match on date portion of created_at
+        if let Some(ref a) = after {
+            if &o.created_at[..a.len().min(10)] < &a[..a.len().min(10)] { return false; }
+        }
+        if let Some(ref b) = before {
+            if &o.created_at[..b.len().min(10)] > &b[..b.len().min(10)] { return false; }
+        }
+        true
+    }).collect();
+
+    let mut rows = String::new();
+    if filtered.is_empty() {
+        rows = "<tr><td colspan='5' class='empty'>无匹配结果，换个关键词试试</td></tr>".to_string();
+    } else {
+        for o in &filtered {
+            rows.push_str(&format!(
+                "<tr><td><strong>{}</strong></td>\
+                 <td style='font-family:monospace;font-size:.82em;color:#8590a6'>{}</td>\
+                 <td>{} 字节</td><td>{}</td><td>{}</td></tr>",
+                o.name, o.uuid, o.size, o.content_type, o.created_at));
+        }
+    }
+
+    let query_desc = format!(
+        "name={} tag={} type={}",
+        name.as_deref().unwrap_or("—"),
+        tag.as_deref().unwrap_or("—"),
+        ctype.as_deref().unwrap_or("—"),
+    );
+
+    respond_ok(stream, "text/html; charset=utf-8", &page_tab("搜索结果",
+        &format!("<form method='GET' action='/api/search' style='margin-bottom:16px'>\
+        <div class='form-row'>\
+        <div><label>名称</label><input name='name' value='{}' autocomplete='off'></div>\
+        <div><label>标签</label><input name='tag' value='{}' autocomplete='off'></div>\
+        <div><label>类型</label><input name='type' value='{}' autocomplete='off'></div>\
+        </div>\
+        <button class='btn btn-primary' type='submit' style='margin-top:8px'>搜索</button>\
+        </form>\
+        <p style='color:#8590a6;margin-bottom:12px'>搜索条件：{} | 找到 {} 个结果</p>\
+        <table><tr><th>名称</th><th>UUID</th><th>大小</th><th>类型</th><th>创建时间</th></tr>{}</table>\
+        <a class='btn-back' href='/manage'>← 返回管理页面</a>",
+        name.as_deref().unwrap_or(""), tag.as_deref().unwrap_or(""), ctype.as_deref().unwrap_or(""),
+        query_desc, filtered.len(), rows), "manage"));
+}
+
 fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let object_uuids: Vec<String> = {
         storage.lock().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
@@ -670,6 +740,16 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
   </div>
 </form>
 <a class="btn btn-primary" href="/api/benchmark">运行性能测试</a>
+
+<h2 style="margin-top:24px">搜索对象</h2>
+<form method="GET" action="/api/search" style="margin-bottom:8px">
+  <div class="form-row">
+    <div><label>名称</label><input name="name" placeholder="模糊搜索" autocomplete="off"></div>
+    <div><label>标签</label><input name="tag" placeholder='如 author=me' autocomplete="off"></div>
+    <div><label>类型</label><input name="type" placeholder='如 image' autocomplete="off"></div>
+    <div style="display:flex;align-items:flex-end"><button class="btn btn-primary" type="submit">搜索</button></div>
+  </div>
+</form>
 
 <h2 style="margin-top:24px">对象列表（共 {} 个）</h2>
 <table><tr><th>名称</th><th>UUID</th><th>大小</th><th>类型</th><th>创建时间</th></tr>{}</table>
