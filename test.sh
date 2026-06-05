@@ -359,7 +359,7 @@ main() {
     DEL_OUT=$("$MINIOS" --socket-path "$SOCKET" delete --key "test-empty" 2>&1)
     echo "$DEL_OUT"
 
-    if echo "$DEL_OUT" | grep -q "deleted\|Deleted"; then
+    if echo "$DEL_OUT" | grep -q "deleted\|Deleted\|已删除"; then
         assert_pass "DELETE 按名称成功"
     else
         assert_fail "DELETE 按名称失败"
@@ -380,7 +380,7 @@ main() {
     DEL_UUID_OUT=$("$MINIOS" --socket-path "$SOCKET" delete --key "$LARGE_UUID" 2>&1)
     echo "$DEL_UUID_OUT"
 
-    if echo "$DEL_UUID_OUT" | grep -q "deleted\|Deleted"; then
+    if echo "$DEL_UUID_OUT" | grep -q "deleted\|Deleted\|已删除"; then
         assert_pass "DELETE 按 UUID 成功"
     else
         assert_fail "DELETE 按 UUID 失败"
