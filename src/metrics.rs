@@ -1,3 +1,4 @@
+use crate::access_log::AccessLog;
 use crate::cache::{CachedObject, ObjectCache, CacheAlgorithmType, generate_weighted_workload};
 use crate::shm::SharedMemory;
 use crate::storage::SharedStorage;
@@ -23,7 +24,7 @@ impl MetricsServer {
     /// `port=0` 表示禁用 Web 管理界面。
     /// 每个连接都会生成一个新线程来处理，通过 `dispatch` 函数路由请求。
     pub fn start(&mut self, storage: SharedStorage, cache: Arc<ObjectCache>,
-                 shm: Arc<SharedMemory>, start_time: Instant) {
+                 shm: Arc<SharedMemory>, access_log: Arc<AccessLog>, start_time: Instant) {
         if self.port == 0 { info!("Web 管理界面已禁用 (port=0)"); return; }
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
@@ -38,8 +39,8 @@ impl MetricsServer {
             for stream in listener.incoming() {
                 if !running.load(Ordering::SeqCst) { break; }
                 match stream {
-                    Ok(s) => { let st=storage.clone(); let ca=cache.clone(); let sh=shm.clone();
-                        thread::spawn(move || dispatch(s, &st, &ca, &sh, start_time)); }
+                    Ok(s) => { let st=storage.clone(); let ca=cache.clone(); let sh=shm.clone(); let al=access_log.clone();
+                        thread::spawn(move || dispatch(s, &st, &ca, &sh, &al, start_time)); }
                     Err(e) => error!("Web accept 错误: {}", e),
                 }
             }
@@ -124,7 +125,7 @@ fn stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> Option<usize> {
 /// - `/manage` 返回管理页面
 /// - `/api/put`、`/api/get`、`/api/delete` 等为 API 端点
 fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>,
-            shm: &Arc<SharedMemory>, start_time: Instant) {
+            shm: &Arc<SharedMemory>, access_log: &Arc<AccessLog>, start_time: Instant) {
     let (headers, body_bytes) = match read_request(&mut stream) {
         Some(v) => v,
         None => return,
@@ -149,11 +150,11 @@ fn dispatch(mut stream: TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCa
             respond_ok(&mut stream, "text/html; charset=utf-8",
                        &build_manage_page(storage, cache)),
         ("POST", "/api/put") =>
-            handle_web_put(&mut stream, &headers, &body_bytes, &ct_lower, storage, cache),
+            handle_web_put(&mut stream, &headers, &body_bytes, &ct_lower, storage, cache, access_log),
         ("GET", "/api/get") =>
-            handle_web_get(&mut stream, first_line, storage, cache),
+            handle_web_get(&mut stream, first_line, storage, cache, access_log),
         ("GET", "/api/delete") =>
-            handle_web_delete(&mut stream, first_line, storage, cache),
+            handle_web_delete(&mut stream, first_line, storage, cache, access_log),
         ("POST", "/api/resize") =>
             handle_web_resize(&mut stream, &body_bytes, cache),
         ("GET", "/api/benchmark") =>
@@ -318,7 +319,7 @@ fn get_form_field_urlencoded(body: &[u8], field: &str) -> Option<String> {
 /// 支持 multipart/form-data 和 URL 编码两种表单格式。
 /// 将对象写入存储并更新缓存。
 fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
-                  storage: &SharedStorage, cache: &Arc<ObjectCache>) {
+                  storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     let (name, content, ctype, tags) = if ct.contains("multipart/form-data") {
         let fields = parse_multipart(headers, body);
         let name = fields.iter().find(|f| f.name=="name").map(|f| String::from_utf8_lossy(&f.data).to_string());
@@ -354,6 +355,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
                 content_type: info.content_type.clone(), size: info.size, tags: info.tags.clone(),
             });
             info!("Web 上传: 名称='{}' uuid={} 大小={}", name, info.uuid, info.size);
+            access_log.record("PUT", &info.name, &info.uuid, info.size, &info.content_type, &info.tags);
             respond_ok(stream, "text/html; charset=utf-8", &page("上传成功",
                 &format!("<div class='success'>对象上传成功</div>
                 <table class='info-table'><tr><th>名称</th><td>{}</td></tr>
@@ -374,7 +376,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
 /// 处理 Web 下载/列出对象请求（GET /api/get）。
 /// 携带 `?key=` 参数时下载指定对象（优先从缓存读取），
 /// 不带参数时展示所有已存储对象的可下载列表。
-fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
+fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         // 第一步：将 key 解析为 UUID（find_info 只读取元数据，不读取数据块）
         let info = match storage.lock().unwrap().find_info(&key) {
@@ -415,6 +417,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
         let hdr = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
             Content-Disposition: attachment; filename=\"{}\"\r\nContent-Length: {}\r\n\
             Connection: close\r\n\r\n", info.content_type, info.name, data.len());
+        access_log.record("GET", &info.name, &info.uuid, info.size, &info.content_type, &info.tags);
         let _ = stream.write_all(hdr.as_bytes());
         let _ = stream.write_all(&data);
         return;
@@ -451,7 +454,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
 /// 处理 Web 删除请求（GET /api/delete）。
 /// 携带 `?key=` 参数时删除指定对象并从缓存中移除，
 /// 不带参数时展示所有可删除对象的列表（含确认删除链接）。
-fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
+fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         let uuid = {
             let mut st = storage.lock().unwrap();
@@ -468,6 +471,7 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
         match st.delete(&key) {
             Ok(()) => {
                 cache.remove(&uuid);
+                access_log.record("DELETE", &key, &uuid, 0, "", "{}");
                 respond_ok(stream, "text/html; charset=utf-8", &page("删除成功",
                     &format!("<div class='success'>对象「{}」已成功删除</div><a class='btn-back' href='/manage'>返回管理页面</a>", key)));
             }

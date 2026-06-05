@@ -170,7 +170,7 @@ impl Server {
         // 启动指标服务器（Prometheus + 控制面板）
         {
             let mut metrics = self.metrics.lock().unwrap();
-            metrics.start(self.storage.clone(), self.cache.clone(), self.shm.clone(), self.start_time);
+            metrics.start(self.storage.clone(), self.cache.clone(), self.shm.clone(), self.access_log.clone(), self.start_time);
         }
 
         info!("MiniOS 服务器已就绪");
