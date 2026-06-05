@@ -84,6 +84,11 @@ fn main() {
 /// 启动 IPC 服务器、Web 管理界面（含 Prometheus 监控端点）、
 /// 多线程工作池，并处理 SIGINT 信号实现优雅关闭。
 fn run_server(args: CliArgs) {
+    // 如果指定了 --daemonize，先通过 double-fork 脱离终端
+    if args.daemonize {
+        daemonize_process();
+    }
+
     info!("正在启动 MiniOS 服务器...");
     info!("  版本: {}", env!("CARGO_PKG_VERSION"));
     info!("  数据文件: {}", args.store_path);
@@ -93,7 +98,7 @@ fn run_server(args: CliArgs) {
     // 保存 pid_file 路径（args 将被移动）
     let pid_file = args.pid_file.clone();
 
-    // 写入 PID 文件
+    // 写入 PID 文件（守护进程模式下，fork 后重新写入新的 PID）
     if let Err(e) = server::write_pid_file(&pid_file) {
         error!("无法写入 PID 文件: {}", e);
     }
@@ -144,5 +149,65 @@ fn run_client_command(args: CliArgs, cmd: &ClientCommand) {
     if let Err(e) = client.execute(cmd) {
         error!("{}", e);
         std::process::exit(1);
+    }
+}
+
+/// 通过经典的双重 fork 将当前进程转变为守护进程。
+///
+/// 步骤：
+/// 1. 第一次 fork — 父进程退出，子进程被 init 接管
+/// 2. setsid() — 创建新会话，成为会话首领，脱离终端
+/// 3. 第二次 fork — 子进程退出，孙进程永远不会重新获取终端
+/// 4. chdir("/") — 避免占用文件系统的挂载点
+/// 5. 重定向 stdin/stdout/stderr 到 /dev/null
+fn daemonize_process() {
+    // 第一次 fork
+    match unsafe { libc::fork() } {
+        -1 => {
+            eprintln!("守护进程化失败：第一次 fork 出错");
+            std::process::exit(1);
+        }
+        0 => {
+            // 子进程：继续向下执行
+        }
+        _ => {
+            // 父进程：立即退出
+            std::process::exit(0);
+        }
+    }
+
+    // 创建新会话，脱离原始终端
+    if unsafe { libc::setsid() } == -1 {
+        eprintln!("守护进程化失败：setsid 出错");
+        std::process::exit(1);
+    }
+
+    // 第二次 fork — 确保进程永远不会重新获取控制终端
+    match unsafe { libc::fork() } {
+        -1 => {
+            eprintln!("守护进程化失败：第二次 fork 出错");
+            std::process::exit(1);
+        }
+        0 => {
+            // 孙进程：继续执行
+        }
+        _ => {
+            // 第一个子进程：退出
+            std::process::exit(0);
+        }
+    }
+
+    // 切换到根目录，避免占用文件系统挂载点
+    unsafe { libc::chdir(b"/\0".as_ptr() as *const libc::c_char) };
+
+    // 重定向标准输入/输出/错误到 /dev/null
+    let dev_null = unsafe { libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR) };
+    if dev_null >= 0 {
+        unsafe {
+            libc::dup2(dev_null, 0);  // stdin
+            libc::dup2(dev_null, 1);  // stdout
+            libc::dup2(dev_null, 2);  // stderr
+            if dev_null > 2 { libc::close(dev_null); }
+        }
     }
 }
