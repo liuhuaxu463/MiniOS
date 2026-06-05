@@ -19,6 +19,7 @@ use clap::Parser;
 use config::{CliArgs, ClientCommand};
 use log::{error, info, LevelFilter};
 use std::io::Write;
+use std::path::Path;
 
 /// 程序主入口。
 ///
@@ -84,8 +85,13 @@ fn main() {
 /// 启动 IPC 服务器、Web 管理界面（含 Prometheus 监控端点）、
 /// 多线程工作池，并处理 SIGINT 信号实现优雅关闭。
 fn run_server(args: CliArgs) {
-    // 如果指定了 --daemonize，先通过 double-fork 脱离终端
+    // 如果指定了 --daemonize，先将相对路径转为绝对路径，
+    // 然后通过 double-fork 脱离终端
+    let mut args = args;
     if args.daemonize {
+        // 把相对路径在 fork 前转化为绝对路径，避免 chdir 后丢失
+        args.store_path = to_absolute(&args.store_path);
+        args.access_log = to_absolute_opt(&args.access_log);
         daemonize_process();
     }
 
@@ -152,6 +158,22 @@ fn run_client_command(args: CliArgs, cmd: &ClientCommand) {
     }
 }
 
+/// 将相对路径转为绝对路径。
+fn to_absolute(path: &str) -> String {
+    if path.is_empty() || Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    std::env::current_dir()
+        .map(|d| d.join(path).to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// 将可选路径转为绝对路径（空字符串保持为空）。
+fn to_absolute_opt(path: &str) -> String {
+    if path.is_empty() { return String::new(); }
+    to_absolute(path)
+}
+
 /// 通过经典的双重 fork 将当前进程转变为守护进程。
 ///
 /// 步骤：
@@ -197,10 +219,9 @@ fn daemonize_process() {
         }
     }
 
-    // 切换到根目录，避免占用文件系统挂载点
-    unsafe { libc::chdir(b"/\0".as_ptr() as *const libc::c_char) };
-
-    // 重定向标准输入/输出/错误到 /dev/null
+    // 重定向标准输入/输出/错误到 /dev/null。
+    // 注意：不执行 chdir("/")，因为用户可能指定了相对路径的
+    // store.odb，切换根目录后会导致文件无处可写。
     let dev_null = unsafe { libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR) };
     if dev_null >= 0 {
         unsafe {
