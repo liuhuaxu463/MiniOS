@@ -788,7 +788,7 @@ impl ObjectStorage {
             self.reader.seek(SeekFrom::Start(offset))?;
 
             let mut chunk = vec![0u8; block_size];
-            self.file.read_exact(&mut chunk)?;
+            self.reader.read_exact(&mut chunk)?;
             data.extend_from_slice(&chunk);
         }
 
@@ -1046,7 +1046,7 @@ impl ObjectStorage {
         // 读取整个元数据区
         let mut buf = vec![0u8; metadata_size as usize];
         self.reader.seek(SeekFrom::Start(metadata_offset))?;
-        self.file.read_exact(&mut buf)?;
+        self.reader.read_exact(&mut buf)?;
 
         let mut offset = 0u64;
         while offset < metadata_size {
