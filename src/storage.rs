@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 // ============================================================================
 // 常量定义
@@ -519,8 +519,10 @@ impl MetadataEntry {
 
 /// 对象存储引擎主结构体，负责管理 store.odb 文件
 pub struct ObjectStorage {
-    /// 底层存储文件句柄
-    file: File,
+    /// 底层存储文件句柄（仅用于写入操作）
+    writer: File,
+    /// 独立只读文件句柄，允许读取操作并发执行
+    reader: File,
     /// 文件的超级块（包含文件系统的全局元信息）
     super_block: SuperBlock,
     /// 空闲块位图的内存副本（每个 bit 表示一个块是否已分配）
@@ -579,21 +581,19 @@ impl ObjectStorage {
         let path = Path::new(path);
         let exists = path.exists();
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
+        let writer = OpenOptions::new()
+            .read(true).write(true).create(true).open(path)?;
+        let reader = OpenOptions::new()
+            .read(true).open(path)?;  // 独立只读句柄，允许并发读
 
-        if exists && file.metadata()?.len() > 0 {
+        if exists && writer.metadata()?.len() > 0 {
             // 读取已有的超级块
             let mut sb_buf = [0u8; SUPER_BLOCK_SIZE as usize];
-            let mut f = &file;
+            let mut f = &reader;
             f.seek(SeekFrom::Start(0))?;
             f.read_exact(&mut sb_buf)?;
             let super_block = SuperBlock::from_bytes(&sb_buf)?;
 
-            // 验证参数是否匹配
             if super_block.block_size != block_size {
                 return Err(MiniOsError::Storage(format!(
                     "块大小不匹配：文件中为 {}，请求为 {}",
@@ -603,26 +603,18 @@ impl ObjectStorage {
 
             // 将位图读入内存
             let mut bitmap = vec![0u8; super_block.bitmap_size as usize];
-            let mut f = &file;
+            let mut f = &reader;
             f.seek(SeekFrom::Start(Self::bitmap_offset()))?;
             f.read_exact(&mut bitmap)?;
 
             Ok(Self {
-                file,
-                super_block,
-                bitmap,
-                dirty: false,
+                writer, reader, super_block, bitmap, dirty: false,
             })
         } else {
-            // 创建新的存储文件
             let super_block = SuperBlock::new(block_size, total_blocks, max_metadata_area_size);
             let bitmap = vec![0u8; super_block.bitmap_size as usize];
-
             let mut storage = Self {
-                file,
-                super_block,
-                bitmap,
-                dirty: true,
+                writer, reader, super_block, bitmap, dirty: true,
             };
 
             // 初始化文件布局
@@ -640,12 +632,12 @@ impl ObjectStorage {
             + self.super_block.total_blocks * self.super_block.block_size as u64;
 
         // 截断（或预分配）文件到指定大小
-        self.file.set_len(file_size)?;
+        self.writer.set_len(file_size)?;
 
         // 写入超级块
         let sb_bytes = self.super_block.to_bytes();
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&sb_bytes)?;
+        self.writer.seek(SeekFrom::Start(0))?;
+        self.writer.write_all(&sb_bytes)?;
 
         // 写入初始位图（全零 = 全部空闲，但超级块区域除外）
         // 将超级块、位图和元数据区占用的块标记为已使用
@@ -657,10 +649,10 @@ impl ObjectStorage {
         }
 
         // 写入位图
-        self.file.seek(SeekFrom::Start(Self::bitmap_offset()))?;
-        self.file.write_all(&self.bitmap)?;
+        self.writer.seek(SeekFrom::Start(Self::bitmap_offset()))?;
+        self.writer.write_all(&self.bitmap)?;
 
-        self.file.flush()?;
+        self.writer.flush()?;
         self.dirty = true;
 
         Ok(())
@@ -716,16 +708,16 @@ impl ObjectStorage {
             let end = std::cmp::min(start + block_size as usize, data.len());
             let chunk = &data[start..end];
 
-            self.file.seek(SeekFrom::Start(offset))?;
+            self.writer.seek(SeekFrom::Start(offset))?;
 
             // 先写数据块，然后将块中剩余部分填充零。
             // 这样做可以防止之前释放的块中的残留数据泄露到读取操作中。
             let padding_len = block_size as usize - chunk.len();
-            self.file.write_all(chunk)?;
+            self.writer.write_all(chunk)?;
             if padding_len > 0 {
                 // 用一次写入高效地将剩余部分清零
                 let zeros = vec![0u8; padding_len];
-                self.file.write_all(&zeros)?;
+                self.writer.write_all(&zeros)?;
             }
         }
 
@@ -793,7 +785,7 @@ impl ObjectStorage {
 
         for &block_num in &entry.block_pointers {
             let offset = self.block_offset(block_num);
-            self.file.seek(SeekFrom::Start(offset))?;
+            self.reader.seek(SeekFrom::Start(offset))?;
 
             let mut chunk = vec![0u8; block_size];
             self.file.read_exact(&mut chunk)?;
@@ -833,8 +825,8 @@ impl ObjectStorage {
 
         // 将元数据条目标记为已删除
         let flags_offset = entry_offset + 16; // uuid 占 16 字节，flags 紧跟其后
-        self.file.seek(SeekFrom::Start(flags_offset))?;
-        self.file.write_all(&[META_FLAG_DELETED])?;
+        self.writer.seek(SeekFrom::Start(flags_offset))?;
+        self.writer.write_all(&[META_FLAG_DELETED])?;
 
         // 更新超级块
         self.super_block.object_count -= 1;
@@ -899,14 +891,14 @@ impl ObjectStorage {
         if self.dirty {
             // 写入超级块
             let sb_bytes = self.super_block.to_bytes();
-            self.file.seek(SeekFrom::Start(0))?;
-            self.file.write_all(&sb_bytes)?;
+            self.writer.seek(SeekFrom::Start(0))?;
+            self.writer.write_all(&sb_bytes)?;
 
             // 写入位图
-            self.file.seek(SeekFrom::Start(Self::bitmap_offset()))?;
-            self.file.write_all(&self.bitmap)?;
+            self.writer.seek(SeekFrom::Start(Self::bitmap_offset()))?;
+            self.writer.write_all(&self.bitmap)?;
 
-            self.file.flush()?;
+            self.writer.flush()?;
             self.dirty = false;
         }
         Ok(())
@@ -935,8 +927,8 @@ impl ObjectStorage {
 
         // 同时立即写入文件以保持一致性
         let offset = Self::bitmap_offset() + byte_idx as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&[self.bitmap[byte_idx]])?;
+        self.writer.seek(SeekFrom::Start(offset))?;
+        self.writer.write_all(&[self.bitmap[byte_idx]])?;
 
         Ok(())
     }
@@ -1053,7 +1045,7 @@ impl ObjectStorage {
 
         // 读取整个元数据区
         let mut buf = vec![0u8; metadata_size as usize];
-        self.file.seek(SeekFrom::Start(metadata_offset))?;
+        self.reader.seek(SeekFrom::Start(metadata_offset))?;
         self.file.read_exact(&mut buf)?;
 
         let mut offset = 0u64;
@@ -1099,8 +1091,8 @@ impl ObjectStorage {
         self.super_block.metadata_area_size += entry_size;
 
         // 写入条目
-        self.file.seek(SeekFrom::Start(write_offset))?;
-        self.file.write_all(entry_bytes)?;
+        self.writer.seek(SeekFrom::Start(write_offset))?;
+        self.writer.write_all(entry_bytes)?;
         self.dirty = true;
 
         Ok(())
@@ -1119,14 +1111,15 @@ impl Drop for ObjectStorage {
 
 /// 线程安全的共享存储句柄类型别名
 ///
-/// 通过 `Arc<Mutex<>>` 包装 `ObjectStorage`，
-/// 允许多个线程安全地共享和访问同一个存储实例。
-pub type SharedStorage = Arc<Mutex<ObjectStorage>>;
+/// 通过 `Arc<RwLock<>>` 包装 `ObjectStorage`，
+/// 允许多个线程安全地共享和并发访问同一个存储实例。
+/// 多个读线程可以同时持有锁，写操作需要独占访问。
+pub type SharedStorage = Arc<RwLock<ObjectStorage>>;
 
 /// 创建一个新的线程安全的存储实例。
 ///
 /// 该函数会打开（或创建）指定路径的存储文件，
-/// 并将其包装在 `Arc<Mutex<ObjectStorage>>` 中以支持多线程访问。
+/// 并将其包装在 `Arc<RwLock<ObjectStorage>>` 中以支持多线程并发访问。
 ///
 /// # 参数
 /// * `path` - 存储文件的路径
@@ -1144,5 +1137,5 @@ pub fn create_storage(
     max_objects: u64,
 ) -> Result<SharedStorage> {
     let storage = ObjectStorage::open(path, block_size, total_blocks, max_objects)?;
-    Ok(Arc::new(Mutex::new(storage)))
+    Ok(Arc::new(RwLock::new(storage)))
 }

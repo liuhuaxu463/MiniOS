@@ -347,7 +347,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
         return;
     }
 
-    let mut st = storage.lock().unwrap();
+    let mut st = storage.write().unwrap();
     match st.put(&name, &content, &ctype, &tags) {
         Ok(info) => {
             cache.put(&info.uuid, CachedObject {
@@ -379,7 +379,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
 fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         // 第一步：将 key 解析为 UUID（find_info 只读取元数据，不读取数据块）
-        let info = match storage.lock().unwrap().find_info(&key) {
+        let info = match storage.write().unwrap().find_info(&key) {
             Ok(info) => info,
             Err(e) => {
                 respond_ok(stream, "text/html; charset=utf-8", &page("未找到",
@@ -394,7 +394,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
             cached.data
         } else {
             debug!("Web GET cache MISS, reading from disk");
-            let mut st = storage.lock().unwrap();
+            let mut st = storage.write().unwrap();
             match st.get(&key) {
                 Ok((_info, storage_data)) => {
                     // 按 UUID 更新缓存，以便后续 GET 能命中
@@ -424,7 +424,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
     }
 
     // 未提供 key —— 列出所有对象
-    let mut st = storage.lock().unwrap();
+    let mut st = storage.write().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
     for o in &objects {
@@ -457,7 +457,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
 fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         let uuid = {
-            let mut st = storage.lock().unwrap();
+            let mut st = storage.write().unwrap();
             match st.find_info(&key) {
                 Ok(info) => info.uuid,
                 Err(e) => {
@@ -467,7 +467,7 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
                 }
             }
         };
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         match st.delete(&key) {
             Ok(()) => {
                 cache.remove(&uuid);
@@ -484,7 +484,7 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
     }
 
     // 未提供 key —— 列出带有删除链接的对象
-    let mut st = storage.lock().unwrap();
+    let mut st = storage.write().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
     if objects.is_empty() {
@@ -541,7 +541,7 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
     let before = get_query_param(first_line, "before");
 
     let all = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         st.list().unwrap_or_default()
     };
 
@@ -606,7 +606,7 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
 /// 以冷启动方式对比各算法的命中率，展示最优算法。
 fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let object_uuids: Vec<String> = {
-        storage.lock().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
+        storage.write().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
     };
     if object_uuids.is_empty() {
         respond_ok(stream, "text/html; charset=utf-8", &page("性能测试",
@@ -741,7 +741,7 @@ input[type=file]{{padding:8px}}
 /// 包含存储和缓存概览统计、上传表单、缓存容量控制、
 /// 搜索引擎入口以及完整对象列表。
 fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> String {
-    let mut st = storage.lock().unwrap();
+    let mut st = storage.write().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut table = String::new();
     if objects.is_empty() {
@@ -829,7 +829,7 @@ fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> Strin
 /// 展示运行时间、对象总数、缓存命中率、存储使用率、
 /// 共享内存状态等信息，并每 5 秒自动刷新。
 fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<SharedMemory>, start_time: Instant) -> String {
-    let st = storage.lock().unwrap();
+    let st = storage.write().unwrap();
     let status = st.status();
     drop(st);
     let cs = cache.stats();
@@ -876,7 +876,7 @@ fn build_dashboard(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<
 /// 构建 Prometheus 文本格式的监控指标输出（/metrics 端点）。
 /// 包含存储、缓存和共享内存的各项 gauge 和 counter 指标。
 fn build_metrics(storage: &SharedStorage, cache: &Arc<ObjectCache>, shm: &Arc<SharedMemory>, start_time: Instant) -> String {
-    let st = storage.lock().unwrap(); let status = st.status(); drop(st);
+    let st = storage.write().unwrap(); let status = st.status(); drop(st);
     let cs = cache.stats(); let uptime = start_time.elapsed().as_secs();
     let mut m = String::new();
     m.push_str(&format!("# HELP minios_uptime_seconds Server uptime\n# TYPE minios_uptime_seconds gauge\nminios_uptime_seconds {}\n", uptime));

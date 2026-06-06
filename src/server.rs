@@ -113,7 +113,7 @@ impl Server {
                 self.config.cache_warmup
             );
             let objects = {
-                let mut storage = self.storage.lock().unwrap();
+                let mut storage = self.storage.write().unwrap();
                 match storage.list() {
                     Ok(list) => list,
                     Err(e) => {
@@ -132,7 +132,7 @@ impl Server {
                 .collect::<Vec<_>>();
 
             for obj_info in to_load {
-                let mut storage = self.storage.lock().unwrap();
+                let mut storage = self.storage.write().unwrap();
                 if let Ok((_, data)) = storage.get(&obj_info.uuid) {
                     let cached = CachedObject {
                         uuid: obj_info.uuid.clone(),
@@ -187,7 +187,7 @@ impl Server {
 
         // 刷新存储到磁盘
         {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.write().unwrap();
             storage.flush()?;
             info!("存储已刷新到磁盘");
         }
@@ -345,7 +345,7 @@ fn handle_put(
 ) -> Result<()> {
     // 检查名称是否重复
     {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         if let Ok(list) = st.list() {
             if list.iter().any(|o| o.name == name) {
                 let _ = ipc::send_response(
@@ -424,7 +424,7 @@ fn handle_put(
             shm.free_pages(start_page, pages_needed).ok();
 
             // 持久化到存储
-            let obj_info = match storage.lock().unwrap().put(name, &data, content_type, tags) {
+            let obj_info = match storage.write().unwrap().put(name, &data, content_type, tags) {
                 Ok(info) => info,
                 Err(e) => {
                     let _ = ipc::send_response(
@@ -511,7 +511,7 @@ fn handle_get(
 
     // 第一步：在不读取数据的情况下将 key 解析为元数据（UUID + 大小等）。
     // `find_info` 同时支持按 UUID 和按名称查找。
-    let info = match storage.lock().unwrap().find_info(key) {
+    let info = match storage.write().unwrap().find_info(key) {
         Ok(info) => info,
         Err(e) => {
             let _ = ipc::send_response(
@@ -532,7 +532,7 @@ fn handle_get(
     } else {
         debug!("缓存未命中: uuid={}, key='{}', 从存储中读取", info.uuid, key);
         // 从存储中读取完整数据
-        let (_info, storage_data) = match storage.lock().unwrap().get(key) {
+        let (_info, storage_data) = match storage.write().unwrap().get(key) {
             Ok(v) => v,
             Err(e) => {
                 let _ = ipc::send_response(
@@ -638,7 +638,7 @@ fn handle_delete(
 
     // 查找对象以获取其 UUID（用于从缓存中删除）
     let uuid = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         match st.get(key) {
             Ok((info, _)) => info.uuid,
             Err(e) => {
@@ -656,7 +656,7 @@ fn handle_delete(
 
     // 从存储中删除
     {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         if let Err(e) = st.delete(key) {
             let _ = ipc::send_response(
                 stream,
@@ -696,7 +696,7 @@ fn handle_list(
     debug!("LIST");
 
     let objects = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         st.list()?
     };
 
@@ -742,7 +742,7 @@ fn handle_search(
            name, tag, content_type, after, before);
 
     let all_objects = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         st.list()?
     };
 
@@ -821,7 +821,7 @@ fn handle_status(
     debug!("STATUS");
 
     let status = {
-        let st = storage.lock().unwrap();
+        let st = storage.write().unwrap();
         st.status()
     };
 
@@ -929,7 +929,7 @@ fn handle_cache_benchmark(
 
     // 从存储中收集所有对象的 UUID 作为工作负载
     let object_uuids: Vec<String> = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         match st.list() {
             Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
             Err(e) => {
@@ -1011,7 +1011,7 @@ fn handle_cache_sweep(
     info!("缓存扫描基准测试请求 ({} 次迭代)", iterations);
 
     let object_uuids: Vec<String> = {
-        let mut st = storage.lock().unwrap();
+        let mut st = storage.write().unwrap();
         match st.list() {
             Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
             Err(e) => {
