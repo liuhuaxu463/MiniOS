@@ -113,7 +113,7 @@ impl Server {
                 self.config.cache_warmup
             );
             let objects = {
-                let mut storage = self.storage.write().unwrap();
+                let storage = self.storage.read().unwrap();
                 match storage.list() {
                     Ok(list) => list,
                     Err(e) => {
@@ -345,7 +345,7 @@ fn handle_put(
 ) -> Result<()> {
     // 检查名称是否重复
     {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         if let Ok(list) = st.list() {
             if list.iter().any(|o| o.name == name) {
                 let _ = ipc::send_response(
@@ -511,7 +511,7 @@ fn handle_get(
 
     // 第一步：在不读取数据的情况下将 key 解析为元数据（UUID + 大小等）。
     // `find_info` 同时支持按 UUID 和按名称查找。
-    let info = match storage.write().unwrap().find_info(key) {
+    let info = match storage.read().unwrap().find_info(key) {
         Ok(info) => info,
         Err(e) => {
             let _ = ipc::send_response(
@@ -532,7 +532,7 @@ fn handle_get(
     } else {
         debug!("缓存未命中: uuid={}, key='{}', 从存储中读取", info.uuid, key);
         // 从存储中读取完整数据
-        let (_info, storage_data) = match storage.write().unwrap().get(key) {
+        let (_info, storage_data) = match storage.read().unwrap().get(key) {
             Ok(v) => v,
             Err(e) => {
                 let _ = ipc::send_response(
@@ -638,7 +638,7 @@ fn handle_delete(
 
     // 查找对象以获取其 UUID（用于从缓存中删除）
     let uuid = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         match st.get(key) {
             Ok((info, _)) => info.uuid,
             Err(e) => {
@@ -696,7 +696,7 @@ fn handle_list(
     debug!("LIST");
 
     let objects = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         st.list()?
     };
 
@@ -742,7 +742,7 @@ fn handle_search(
            name, tag, content_type, after, before);
 
     let all_objects = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         st.list()?
     };
 
@@ -821,7 +821,7 @@ fn handle_status(
     debug!("STATUS");
 
     let status = {
-        let st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         st.status()
     };
 
@@ -929,7 +929,7 @@ fn handle_cache_benchmark(
 
     // 从存储中收集所有对象的 UUID 作为工作负载
     let object_uuids: Vec<String> = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         match st.list() {
             Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
             Err(e) => {
@@ -1011,7 +1011,7 @@ fn handle_cache_sweep(
     info!("缓存扫描基准测试请求 ({} 次迭代)", iterations);
 
     let object_uuids: Vec<String> = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         match st.list() {
             Ok(objects) => objects.into_iter().map(|o| o.uuid).collect(),
             Err(e) => {

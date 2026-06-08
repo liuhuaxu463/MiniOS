@@ -748,7 +748,7 @@ impl ObjectStorage {
     ///
     /// # 返回值
     /// 成功时返回 `ObjectInfo`，未找到时返回 `NotFound` 错误。
-    pub fn find_info(&mut self, key: &str) -> Result<ObjectInfo> {
+    pub fn find_info(&self, key: &str) -> Result<ObjectInfo> {
         let entry = self
             .find_entry(key)?
             .ok_or_else(|| MiniOsError::NotFound(key.to_string()))?;
@@ -769,7 +769,7 @@ impl ObjectStorage {
     /// # 返回值
     /// 成功时返回 `(ObjectInfo, Vec<u8>)` 元组，
     /// 未找到时返回 `NotFound` 错误。
-    pub fn get(&mut self, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
+    pub fn get(&self, key: &str) -> Result<(ObjectInfo, Vec<u8>)> {
         // 已经使用了 &mut self —— 正确
         let entry = self
             .find_entry(key)?
@@ -842,7 +842,7 @@ impl ObjectStorage {
     ///
     /// # 返回值
     /// 成功时返回所有未删除对象的 `ObjectInfo` 列表。
-    pub fn list(&mut self) -> Result<Vec<ObjectInfo>> {
+    pub fn list(&self) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
         let entries = self.scan_all_entries()?;
         for entry in entries {
@@ -992,13 +992,13 @@ impl ObjectStorage {
     }
 
     /// 根据 UUID 或名称查找对象条目（先尝试 UUID 匹配，再尝试名称匹配）
-    fn find_entry(&mut self, key: &str) -> Result<Option<MetadataEntry>> {
+    fn find_entry(&self, key: &str) -> Result<Option<MetadataEntry>> {
         self.find_entry_with_offset(key)
             .map(|opt| opt.map(|(entry, _)| entry))
     }
 
     /// 根据 key 查找对象条目，返回 (条目, 文件中的偏移量)
-    fn find_entry_with_offset(&mut self, key: &str) -> Result<Option<(MetadataEntry, u64)>> {
+    fn find_entry_with_offset(&self, key: &str) -> Result<Option<(MetadataEntry, u64)>> {
         // 优先尝试按 UUID 解析
         let uuid_key = uuid::Uuid::parse_str(key).ok();
 
@@ -1020,7 +1020,7 @@ impl ObjectStorage {
     }
 
     /// 仅按名称查找对象（若条目存在且未被删除则返回）
-    fn find_by_name(&mut self, name: &str) -> Option<MetadataEntry> {
+    fn find_by_name(&self, name: &str) -> Option<MetadataEntry> {
         let entries = self.scan_all_entries().ok()?;
         entries.into_iter().find(|e| {
             e.flags & META_FLAG_DELETED == 0 && e.name == name
@@ -1028,13 +1028,13 @@ impl ObjectStorage {
     }
 
     /// 扫描所有元数据条目（不含偏移量）
-    fn scan_all_entries(&mut self) -> Result<Vec<MetadataEntry>> {
+    fn scan_all_entries(&self) -> Result<Vec<MetadataEntry>> {
         self.scan_all_entries_with_offsets()
             .map(|v| v.into_iter().map(|(e, _)| e).collect())
     }
 
     /// 扫描所有元数据条目及其在文件中的偏移量
-    fn scan_all_entries_with_offsets(&mut self) -> Result<Vec<(MetadataEntry, u64)>> {
+    fn scan_all_entries_with_offsets(&self) -> Result<Vec<(MetadataEntry, u64)>> {
         let mut entries = Vec::new();
         let metadata_offset = self.metadata_offset();
         let metadata_size = self.super_block.metadata_area_size;

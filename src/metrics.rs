@@ -379,7 +379,7 @@ fn handle_web_put(stream: &mut TcpStream, headers: &str, body: &[u8], ct: &str,
 fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         // 第一步：将 key 解析为 UUID（find_info 只读取元数据，不读取数据块）
-        let info = match storage.write().unwrap().find_info(&key) {
+        let info = match storage.read().unwrap().find_info(&key) {
             Ok(info) => info,
             Err(e) => {
                 respond_ok(stream, "text/html; charset=utf-8", &page("未找到",
@@ -606,7 +606,7 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
 /// 以冷启动方式对比各算法的命中率，展示最优算法。
 fn handle_web_benchmark(stream: &mut TcpStream, storage: &SharedStorage, cache: &Arc<ObjectCache>) {
     let object_uuids: Vec<String> = {
-        storage.write().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
+        storage.read().unwrap().list().unwrap_or_default().into_iter().map(|o| o.uuid).collect()
     };
     if object_uuids.is_empty() {
         respond_ok(stream, "text/html; charset=utf-8", &page("性能测试",
