@@ -394,7 +394,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
             cached.data
         } else {
             debug!("Web GET cache MISS, reading from disk");
-            let mut st = storage.write().unwrap();
+            let st = storage.read().unwrap();
             match st.get(&key) {
                 Ok((_info, storage_data)) => {
                     // 按 UUID 更新缓存，以便后续 GET 能命中
@@ -424,7 +424,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
     }
 
     // 未提供 key —— 列出所有对象
-    let mut st = storage.write().unwrap();
+    let st = storage.read().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
     for o in &objects {
@@ -457,7 +457,7 @@ fn handle_web_get(stream: &mut TcpStream, first_line: &str, storage: &SharedStor
 fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedStorage, cache: &Arc<ObjectCache>, access_log: &Arc<AccessLog>) {
     if let Some(key) = get_query_param(first_line, "key") {
         let uuid = {
-            let mut st = storage.write().unwrap();
+            let st = storage.read().unwrap();
             match st.find_info(&key) {
                 Ok(info) => info.uuid,
                 Err(e) => {
@@ -484,7 +484,7 @@ fn handle_web_delete(stream: &mut TcpStream, first_line: &str, storage: &SharedS
     }
 
     // 未提供 key —— 列出带有删除链接的对象
-    let mut st = storage.write().unwrap();
+    let st = storage.read().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut rows = String::new();
     if objects.is_empty() {
@@ -541,7 +541,7 @@ fn handle_web_search(stream: &mut TcpStream, first_line: &str, storage: &SharedS
     let before = get_query_param(first_line, "before");
 
     let all = {
-        let mut st = storage.write().unwrap();
+        let st = storage.read().unwrap();
         st.list().unwrap_or_default()
     };
 
@@ -741,7 +741,7 @@ input[type=file]{{padding:8px}}
 /// 包含存储和缓存概览统计、上传表单、缓存容量控制、
 /// 搜索引擎入口以及完整对象列表。
 fn build_manage_page(storage: &SharedStorage, cache: &Arc<ObjectCache>) -> String {
-    let mut st = storage.write().unwrap();
+    let st = storage.read().unwrap();
     let objects = st.list().unwrap_or_default();
     let mut table = String::new();
     if objects.is_empty() {

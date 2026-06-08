@@ -1,5 +1,6 @@
 use crate::error::{MiniOsError, Result};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -521,8 +522,9 @@ impl MetadataEntry {
 pub struct ObjectStorage {
     /// 底层存储文件句柄（仅用于写入操作）
     writer: File,
-    /// 独立只读文件句柄，允许读取操作并发执行
-    reader: File,
+    /// 独立只读文件句柄，通过 RefCell 实现内部可变性，
+    /// 允许 &self 方法在读取时修改文件偏移指针
+    reader: RefCell<File>,
     /// 文件的超级块（包含文件系统的全局元信息）
     super_block: SuperBlock,
     /// 空闲块位图的内存副本（每个 bit 表示一个块是否已分配）
@@ -583,8 +585,8 @@ impl ObjectStorage {
 
         let writer = OpenOptions::new()
             .read(true).write(true).create(true).open(path)?;
-        let reader = OpenOptions::new()
-            .read(true).open(path)?;  // 独立只读句柄，允许并发读
+        let reader = RefCell::new(OpenOptions::new()
+            .read(true).open(path)?);  // 独立只读句柄，RefCell 允许 &self 方法中修改文件偏移
 
         if exists && writer.metadata()?.len() > 0 {
             // 读取已有的超级块
@@ -785,10 +787,10 @@ impl ObjectStorage {
 
         for &block_num in &entry.block_pointers {
             let offset = self.block_offset(block_num);
-            self.reader.seek(SeekFrom::Start(offset))?;
+            self.reader.borrow_mut().seek(SeekFrom::Start(offset))?;
 
             let mut chunk = vec![0u8; block_size];
-            self.reader.read_exact(&mut chunk)?;
+            self.reader.borrow_mut().read_exact(&mut chunk)?;
             data.extend_from_slice(&chunk);
         }
 
@@ -1045,8 +1047,8 @@ impl ObjectStorage {
 
         // 读取整个元数据区
         let mut buf = vec![0u8; metadata_size as usize];
-        self.reader.seek(SeekFrom::Start(metadata_offset))?;
-        self.reader.read_exact(&mut buf)?;
+        self.reader.borrow_mut().seek(SeekFrom::Start(metadata_offset))?;
+        self.reader.borrow_mut().read_exact(&mut buf)?;
 
         let mut offset = 0u64;
         while offset < metadata_size {

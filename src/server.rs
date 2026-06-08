@@ -132,7 +132,7 @@ impl Server {
                 .collect::<Vec<_>>();
 
             for obj_info in to_load {
-                let mut storage = self.storage.write().unwrap();
+                let storage = self.storage.read().unwrap();
                 if let Ok((_, data)) = storage.get(&obj_info.uuid) {
                     let cached = CachedObject {
                         uuid: obj_info.uuid.clone(),
