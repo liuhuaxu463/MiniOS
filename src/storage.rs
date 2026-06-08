@@ -1,11 +1,10 @@
 use crate::error::{MiniOsError, Result};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 // ============================================================================
 // 常量定义
@@ -522,9 +521,10 @@ impl MetadataEntry {
 pub struct ObjectStorage {
     /// 底层存储文件句柄（仅用于写入操作）
     writer: File,
-    /// 独立只读文件句柄，通过 RefCell 实现内部可变性，
-    /// 允许 &self 方法在读取时修改文件偏移指针
-    reader: RefCell<File>,
+    /// 独立只读文件句柄，通过 Mutex 实现内部可变性，
+    /// 允许 &self 方法在读取时修改文件偏移指针。
+    /// 锁粒度极细（微秒级），不会成为并发瓶颈。
+    reader: Mutex<File>,
     /// 文件的超级块（包含文件系统的全局元信息）
     super_block: SuperBlock,
     /// 空闲块位图的内存副本（每个 bit 表示一个块是否已分配）
@@ -585,15 +585,17 @@ impl ObjectStorage {
 
         let writer = OpenOptions::new()
             .read(true).write(true).create(true).open(path)?;
-        let reader = RefCell::new(OpenOptions::new()
-            .read(true).open(path)?);  // 独立只读句柄，RefCell 允许 &self 方法中修改文件偏移
+        let reader = Mutex::new(OpenOptions::new()
+            .read(true).open(path)?);  // 独立只读句柄，Mutex 允许 &self 方法内修改文件偏移
 
         if exists && writer.metadata()?.len() > 0 {
             // 读取已有的超级块
             let mut sb_buf = [0u8; SUPER_BLOCK_SIZE as usize];
-            let mut f = &reader;
-            f.seek(SeekFrom::Start(0))?;
-            f.read_exact(&mut sb_buf)?;
+            {
+                let mut reader = reader.lock().unwrap();
+                reader.seek(SeekFrom::Start(0))?;
+                reader.read_exact(&mut sb_buf)?;
+            }
             let super_block = SuperBlock::from_bytes(&sb_buf)?;
 
             if super_block.block_size != block_size {
@@ -605,9 +607,11 @@ impl ObjectStorage {
 
             // 将位图读入内存
             let mut bitmap = vec![0u8; super_block.bitmap_size as usize];
-            let mut f = &reader;
-            f.seek(SeekFrom::Start(Self::bitmap_offset()))?;
-            f.read_exact(&mut bitmap)?;
+            {
+                let mut reader = reader.lock().unwrap();
+                reader.seek(SeekFrom::Start(Self::bitmap_offset()))?;
+                reader.read_exact(&mut bitmap)?;
+            }
 
             Ok(Self {
                 writer, reader, super_block, bitmap, dirty: false,
@@ -787,10 +791,10 @@ impl ObjectStorage {
 
         for &block_num in &entry.block_pointers {
             let offset = self.block_offset(block_num);
-            self.reader.borrow_mut().seek(SeekFrom::Start(offset))?;
+            self.reader.lock().unwrap().seek(SeekFrom::Start(offset))?;
 
             let mut chunk = vec![0u8; block_size];
-            self.reader.borrow_mut().read_exact(&mut chunk)?;
+            self.reader.lock().unwrap().read_exact(&mut chunk)?;
             data.extend_from_slice(&chunk);
         }
 
@@ -1047,8 +1051,8 @@ impl ObjectStorage {
 
         // 读取整个元数据区
         let mut buf = vec![0u8; metadata_size as usize];
-        self.reader.borrow_mut().seek(SeekFrom::Start(metadata_offset))?;
-        self.reader.borrow_mut().read_exact(&mut buf)?;
+        self.reader.lock().unwrap().seek(SeekFrom::Start(metadata_offset))?;
+        self.reader.lock().unwrap().read_exact(&mut buf)?;
 
         let mut offset = 0u64;
         while offset < metadata_size {
